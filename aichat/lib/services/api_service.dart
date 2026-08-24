@@ -296,7 +296,8 @@ class ApiService extends ChangeNotifier {
 
       if (response.statusCode != 200) {
         final errorBody = await response.stream.bytesToString();
-        String errorMsg;\n        try {
+        String errorMsg;
+        try {
           final errorJson = json.decode(errorBody);
           errorMsg = errorJson['error']?['message'] ?? errorBody;
         } catch (_) {
