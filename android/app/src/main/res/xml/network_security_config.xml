@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v1.4.2 安全加固：网络安全配置
+  默认禁止明文 HTTP（Android 9+ 本来就默认禁用），仅对「局域网 / 本地回环」
+  开启 cleartext，满足用户直连本地 Ollama / LM Studio / 自部署服务的需求。
+  对外网的所有 HTTP 请求一律走 HTTPS（未配置证书校验放行）。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- 仅允许内网网段的 HTTP（本地 AI 模型默认跑在这些地址） -->
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">10.0.0.0/8</domain>
+        <domain includeSubdomains="true">172.16.0.0/12</domain>
+        <domain includeSubdomains="true">192.168.0.0/16</domain>
+    </domain-config>
+</network-security-config>
