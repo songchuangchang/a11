@@ -198,7 +198,7 @@ class GitHubSearchService {
 
     final repos = await _searchRepos(appName, max: maxRepos);
     if (repos.isEmpty) {
-      _log.warn('[GitHub] No repositories matched');
+      _logger.warn('[GitHub] No repositories matched');
       return [];
     }
 
@@ -207,7 +207,7 @@ class GitHubSearchService {
       final release = await _getLatestRelease(r.owner, r.repo);
       if (release == null) continue;
       if (release.apkAssets.isEmpty) {
-        _log.info('[GitHub] ${r.fullName} latest release has no APK assets');
+        _logger.info('[GitHub] ${r.fullName} latest release has no APK assets');
         continue;
       }
       // 按架构优先级排序（arm64 优先）
@@ -219,8 +219,8 @@ class GitHubSearchService {
       }
     }
 
-    _log.info('[GitHub] Found ${results.length} APK sources');
-    _log.verbose('[GitHub] APK sources for "$appName":\n${results.map((s) => '  - ${s.repo.fullName} / ${s.release.tagName} / ${s.asset.name} (${s.asset.browserDownloadUrl})').join('\n')}', tag: 'GH');
+    _logger.info('[GitHub] Found ${results.length} APK sources');
+    _logger.verbose('[GitHub] APK sources for "$appName":\n${results.map((s) => '  - ${s.repo.fullName} / ${s.release.tagName} / ${s.asset.name} (${s.asset.browserDownloadUrl})').join('\n')}', tag: 'GH');
     return results;
   }
 
@@ -247,7 +247,7 @@ class GitHubSearchService {
         final bodySnippet = response.body.length <= 200
             ? response.body
             : response.body.substring(0, 200);
-        _log.warn('[GitHub] search returned ${response.statusCode}: $bodySnippet');
+        _logger.warn('[GitHub] search returned ${response.statusCode}: $bodySnippet');
         return [];
       }
       final data = jsonDecode(utf8.decode(response.bodyBytes));
@@ -283,7 +283,7 @@ class GitHubSearchService {
       }
       return result;
     } catch (e, st) {
-      _log.error('[GitHub] search failed', error: e, stack: st, tag: 'GH');
+      _logger.error('[GitHub] search failed', error: e, stack: st, tag: 'GH');
       return [];
     }
   }
@@ -297,7 +297,7 @@ class GitHubSearchService {
           .get(Uri.parse(url), headers: _headers)
           .timeout(const Duration(seconds: 10));
       if (response.statusCode != 200) {
-        _log.info(
+        _logger.info(
             '[GitHub] $owner/$repo releases/latest returned ${response.statusCode}');
         return null;
       }
@@ -335,7 +335,7 @@ class GitHubSearchService {
         apkAssets: apks,
       );
     } catch (e, st) {
-      _log.error('[GitHub] releases/latest failed $owner/$repo',
+      _logger.error('[GitHub] releases/latest failed $owner/$repo',
           error: e, stack: st, tag: 'GH');
       return null;
     }
