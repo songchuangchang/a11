@@ -1363,7 +1363,7 @@ class WebSearchService {
   static bool _isSafePublicUri(Uri uri) {
     if (uri.host.isEmpty) return false;
     final host = uri.host.toLowerCase();
-
+    
     // 禁止 localhost 和 .local 域名
     if (host == 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) {
       return false;
@@ -1372,12 +1372,12 @@ class WebSearchService {
     // 解析 IP 地址并检查是否为私网/环回/链路本地
     final address = InternetAddress.tryParse(host);
     if (address == null) return true; // 域名无法解析为 IP，暂且放行（DNS 解析由系统处理）
-
+    
     final bytes = address.rawAddress;
     if (address.type == InternetAddressType.IPv4) {
       final a = bytes[0];
       final b = bytes[1];
-      // 禁止：0.x.x.x, 10.x.x.x, 127.x.x.x, 100.64-127.x.x, 169.254.x.x,
+      // 禁止：0.x.x.x, 10.x.x.x, 127.x.x.x, 100.64-127.x.x, 169.254.x.x, 
       //       172.16-31.x.x, 192.0.x.x, 192.168.x.x, 198.18-19.x.x, 224+ (组播)
       return a != 0 &&
           a != 10 &&
@@ -1389,7 +1389,7 @@ class WebSearchService {
           !(a == 198 && (b == 18 || b == 19)) &&
           a < 224;
     }
-
+    
     // IPv6 检查
     if (bytes.length == 16) {
       // 禁止全 0、::1、fc00::/7 (唯一本地)、fe80::/10 (链路本地)、ff00::/8 (组播)
@@ -1417,7 +1417,7 @@ class WebSearchService {
             a >= 224);
       }
     }
-
+    
     return true;
   }
 }

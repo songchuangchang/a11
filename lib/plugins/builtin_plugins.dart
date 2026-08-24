@@ -87,7 +87,7 @@ class SearchPlugin extends ReActPlugin {
     stopwatch.stop();
     final summary = hits == 0
         ? (isZh ? '未找到有效结果' : 'No results')
-        : (isZh ? '命中 ${hits} 条' : 'Got ${hits} results');
+        : (isZh ? '命中 ${hits} 条' : 'Got $hits results');
     pc.markLastSearchResult(hits, latency: stopwatch.elapsed, summary: summary);
     final isVerbose = pc.webSearchCfg.verboseLogging;
     if (isVerbose) {

@@ -440,7 +440,7 @@ class AppDownloadService extends ChangeNotifier {
     final text = userText.toLowerCase().trim();
     final patterns = [
       RegExp(
-          r'(帮我|我要|给我)?下载\s*(安装包|apk)?\s*[：:]?\s*(.+?)(安装包|apk)?\s*[。.!！?？]$',
+          r'(帮我|我要|给我)?下载\s*(安装包|apk)?\s*[：:]?\s*(.+?)(安装包|apk)?\s*[。.!！?？]?$',
           caseSensitive: false),
       RegExp(r'download\s+(the\s+)?(apk\s+for\s+)?(.+?)(\s*apk)?\s*$',
           caseSensitive: false),
@@ -972,19 +972,19 @@ class AppDownloadService extends ChangeNotifier {
       RegExp(r'''data-href=["']([^"']*\.apk(?:\?[^"']*)?)["']''',
           caseSensitive: false),
       // 4. JS: location.href = "xxx.apk" / window.location = "xxx.apk"
-      RegExp(r'''location\.href\s*=\s*['"]([^']*.apk(?:\?[^']*)?)[\'"]''',
+      RegExp(r'''location\.href\s*=\s*['"]([^'']*\.apk(?:\?[^'']*)?)['"]''',
           caseSensitive: false),
-      RegExp(r'''window\.location\s*=\s*['"]([^']*.apk(?:\?[^']*)?)[\'"]''',
+      RegExp(r'''window\.location\s*=\s*['"]([^'']*\.apk(?:\?[^'']*)?)['"]''',
           caseSensitive: false),
       // 5. meta refresh: url=xxx.apk
-      RegExp(r'''content=["']\d+;\s*url=([^"']*.apk(?:\?[^"']*)?)["']''',
+      RegExp(r'''content=["']\d+;\s*url=([^"']*\.apk(?:\?[^"']*)?)["']''',
           caseSensitive: false),
       // 6. 下载站常见：data-download-url="xxx.apk"
-      RegExp(r'''data-download-url=["']([^"']*.apk(?:\?[^"']*)?)["']''',
+      RegExp(r'''data-download-url=["']([^"']*\.apk(?:\?[^"']*)?)["']''',
           caseSensitive: false),
       // 7. onclick="...location='xxx.apk'"
       RegExp(
-          r'''onclick=["'][^']*?location\w*\s*[=(]\s*['"]([^'"]*\.apk(?:\?[^'"]*)?)['"]''',
+          r'''onclick=["'][^'']*?location\w*\s*[=(]\s*['"]([^'"]*\.apk(?:\?[^'"]*)?)['"]''',
           caseSensitive: false),
       // 8. 通用 .apk URL（在 JS 变量、JSON 等中）
       RegExp(r'''["']([^"'<>]*\.apk(?:\?[^"'<>]*)?)["']''',

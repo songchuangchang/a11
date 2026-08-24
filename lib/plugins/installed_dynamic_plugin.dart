@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'plugin_context.dart';
 import 'plugin_interface.dart';
+import 'installed_mcp_plugin.dart';
 
 /// 从 DB 行 / 市场元数据构造的已安装声明式插件
 ///

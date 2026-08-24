@@ -27,7 +27,7 @@ class ModelOption {
 /// 预置的 OpenAI 兼容 API Provider 模板
 ///
 /// 数据基于 2026-08 官方公开价格/文档核实。
-/// 免费标记 **超级严格**（避免误导用户以为"永远白嫌"）：
+/// 免费标记 **超级严格**（避免误导用户以为"永远白嫖"）：
 ///   hasFreeTier=true  仅当：该服务商在 API 层面提供
 ///                        「永久免费、不限调用总次数 / 总量」的免费层
 ///                        （如 ERNIE-Speed、Gemini-3-Flash 免费 RPM、

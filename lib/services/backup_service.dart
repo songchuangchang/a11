@@ -16,7 +16,7 @@ import 'storage_service.dart';
 
 /// v1.3.8：导出/导入服务
 ///
-/// 用户需求：“能加入一个导出和导入功能，可以选择导出了什么，是否需要导出 API 等”
+/// 用户需求："能加入一个导出和导入功能，可以选择导出了什么，是否需要导出 API 等"
 ///
 /// 已和用户对齐：
 ///   ① 导出范围：全量数据（API 配置 + 聊天记录 + 搜索设置）
@@ -292,7 +292,7 @@ class BackupService {
               updatedAt: conv.updatedAt,
               createdAt: conv.createdAt,
             );
-      // 直接写库，绕过 saveConversation 的“更新 lastMessage/updatedAt”逻辑
+      // 直接写库，绕过 saveConversation 的"更新 lastMessage/updatedAt"逻辑
       await _storage.saveConversation(toSave);
       conversationCount++;
     }
@@ -329,7 +329,7 @@ class BackupService {
       // 如果导入的文件不含 key（includeKeys=false），保留当前库的 key 不覆盖
       final currentCfg = await _storage.getWebSearchConfig();
       final importedIncludeKeys = (root['includeKeys'] as bool?) ?? true;
-      // v1.4.3 修复 Bug #5：所有 4 个 API Key 字段统一应用“保留当前”逻辑
+      // v1.4.3 修复 Bug #5：所有 4 个 API Key 字段统一应用"保留当前"逻辑
       // 之前只 tavilyApiKey 享受，serpApiKey/braveApiKey/googleCseApiKey 会被空字符串直接覆盖
       // → 用户在 A 设备填好的 SerpAPI/Brave/Google CSE Key 导入不含 Key 的备份到 B 设备后被清空
       String pickKey(String imported, String current) {
