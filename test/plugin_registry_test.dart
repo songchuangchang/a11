@@ -64,6 +64,7 @@ void main() {
             'mcp_call',
             {'pluginId': 'missing', 'tool': 'ping', 'arguments': '{}'}),
         isFalse);
+    await tester.pump(const Duration(milliseconds: 300));
   });
 
   test('protects system plugins from uninstall', () async {
@@ -77,7 +78,7 @@ void main() {
   test('installRemoteMcp rejects a conflicting non-MCP plugin', () async {
     final registry = PluginRegistry();
     registry.register(InstalledDynamicPlugin(
-      metadata: PluginMetadata(
+      metadata: const PluginMetadata(
           id: 'mcp.conflict',
           name: 'Conflict',
           version: '1',

@@ -83,11 +83,11 @@ class _RegressionTestScreenState extends State<RegressionTestScreen> {
           FilledButton.icon(
             onPressed: _running ? null : _runAll,
             icon: _running
-                ? const SizedBox(
+                ? SizedBox(
                     width: 18,
                     height: 18,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white))
+                        strokeWidth: 2, color: cs.onPrimary))
                 : const Icon(Icons.play_arrow),
             label: Text(_running
                 ? (isZh ? '测试中…' : 'Testing...')
@@ -161,10 +161,10 @@ class _ResultCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final isZh = AppLocalizations.of(context).locale.languageCode == 'zh';
-    final autoColor = result.autoPassed ? Colors.green : Colors.red;
+    final autoColor = result.autoPassed ? cs.primary : cs.error;
     final verdictColor = result.userVerdict == null
         ? null
-        : (result.userVerdict == true ? Colors.green : Colors.red);
+        : (result.userVerdict == true ? cs.primary : cs.error);
 
     return Card(
       child: Padding(
@@ -274,7 +274,7 @@ class _ResultCard extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: () => onVerdict(true),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.green,
+                  foregroundColor: cs.primary,
                   minimumSize: const Size(0, 36),
                 ),
                 icon: const Icon(Icons.check, size: 18),
@@ -284,7 +284,7 @@ class _ResultCard extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: () => onVerdict(false),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.red,
+                  foregroundColor: cs.error,
                   minimumSize: const Size(0, 36),
                 ),
                 icon: const Icon(Icons.close, size: 18),

@@ -10,7 +10,7 @@ class SkillParser {
     
     // 查找 frontmatter 边界
     if (lines.isEmpty || lines[0].trim() != '---') {
-      throw FormatException('SKILL.md 必须以 --- 开头');
+      throw const FormatException('SKILL.md 必须以 --- 开头');
     }
     
     int endIndex = -1;
@@ -22,7 +22,7 @@ class SkillParser {
     }
     
     if (endIndex == -1) {
-      throw FormatException('SKILL.md 缺少 frontmatter 结束标记 ---');
+      throw const FormatException('SKILL.md 缺少 frontmatter 结束标记 ---');
     }
     
     // 提取 frontmatter 和正文
@@ -30,7 +30,7 @@ class SkillParser {
     final instruction = lines.sublist(endIndex + 1).join('\n').trim();
     
     if (instruction.isEmpty) {
-      throw FormatException('SKILL.md 正文不能为空');
+      throw const FormatException('SKILL.md 正文不能为空');
     }
     
     // 解析 frontmatter (简单 YAML 解析)

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -103,8 +104,8 @@ class LoggerService extends ChangeNotifier {
   LoggerService._internal();
   static final LoggerService instance = LoggerService._internal();
 
-  static const int maxMemoryLines = 5000; // v1.4.2 扩容量：分类增多后 5000 条更稳妥
-  static const int maxFileBytes = 2 * 1024 * 1024; // 2 MB / 文件
+  static const int maxMemoryLines = 20000;
+  static const int maxFileBytes = 10 * 1024 * 1024;
   static const int maxKeptDays = 7;
 
   final List<String> _buffer = [];
@@ -118,6 +119,9 @@ class LoggerService extends ChangeNotifier {
 
   Directory? _logDir;
   bool _initialized = false;
+
+  final Map<String, DateTime> _lastLogTime = {};
+  static const _floodWindow = Duration(milliseconds: 500);
 
   /// v1.3.4：详细日志模式开关
   bool _verboseEnabled = false;
@@ -186,13 +190,44 @@ class LoggerService extends ChangeNotifier {
   void vWs(String m)        => verbose(m, cat: LogCat.ws);
   void vApi(String m)       => verbose(m, cat: LogCat.api);
 
+  // v1.7.16：日志写入节流通知——ReAct 流式期每秒数千条日志，每条 notifyListeners
+  // 会造成重建风暴。按 200ms 节流 + 尾部 Timer 兜底，确保最终状态能刷出来。
+  DateTime _lastNotifyAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _pendingNotify;
+
+  void _notifyThrottled() {
+    final now = DateTime.now();
+    if (now.difference(_lastNotifyAt) >= const Duration(milliseconds: 200)) {
+      _lastNotifyAt = now;
+      _pendingNotify?.cancel();
+      _pendingNotify = null;
+      notifyListeners();
+    } else {
+      _pendingNotify ??= Timer(const Duration(milliseconds: 200), () {
+        _pendingNotify = null;
+        _lastNotifyAt = DateTime.now();
+        notifyListeners();
+      });
+    }
+  }
+
   // ---------- 核心：写日志 ----------
   void _write(String level, String msg, {LogCat? cat, String? tag}) {
-    final now = DateTime.now();
     final safeMsg = level == 'VERBOSE'
         ? _scrubSensitive(msg, truncate: false)
         : _scrubSensitive(msg);
-    // 行格式：
+    final floodKey = '$level|${cat?.key ?? 'GEN'}|$safeMsg';
+    final lastTime = _lastLogTime[floodKey];
+    final nowTime = DateTime.now();
+    if (lastTime != null &&
+        nowTime.difference(lastTime) < _floodWindow) {
+      return;
+    }
+    _lastLogTime[floodKey] = nowTime;
+    if (_lastLogTime.length > 5000) {
+      _lastLogTime.clear();
+    }
+    final now = nowTime;// 行格式：
     //   2026-08-20T18:12:48.488 [INFO][UI][新建聊天] 按钮被点击
     //   2026-08-20T18:12:49.001 [INFO][REACT] detected tag: <ask_user>
     final c = cat?.key ?? 'GEN';
@@ -218,7 +253,7 @@ class LoggerService extends ChangeNotifier {
         bucket.removeRange(0, bucket.length - maxMemoryLines);
       }
     }
-    notifyListeners();
+    _notifyThrottled();
 
     // 3) 文件（fire-and-forget 异步 IO，不阻塞 UI；失败不抛）
     // v1.6.8 修复 Bug#11：原代码注释声称"异步"但实际用 *Sync 方法（existsSync/lengthSync/
@@ -295,6 +330,12 @@ class LoggerService extends ChangeNotifier {
       (m) => '${m.group(1)}-***',
     );
 
+    // 4b) AWS Access Key（AKIA + 16 位大写字母数字，20 字符总长）
+    s = s.replaceAllMapped(
+      RegExp(r'\bAKIA[A-Z0-9]{16}\b'),
+      (m) => _maskToken(m.group(0)!),
+    );
+
     // 5) 通用长 Token（至少 24 字符的 base64-hex 混合串，带/不带前缀）
     s = s.replaceAllMapped(
       RegExp(r'\b([A-Za-z0-9_\-\.]{32,})\b'),
@@ -345,8 +386,12 @@ class LoggerService extends ChangeNotifier {
         sb.writeln('\n----- FILE: ${p.basename(f.path)} -----');
         try {
           sb.writeln(f.readAsStringSync());
-        } catch (e) {
-          sb.writeln('  (read failed: $e)');
+        } catch (_) {
+          try {
+            sb.writeln(f.readAsStringSync(encoding: latin1));
+          } catch (e) {
+            sb.writeln('  (read failed: $e)');
+          }
         }
       }
     }
@@ -410,5 +455,26 @@ class LoggerService extends ChangeNotifier {
         }
       } catch (_) {}
     }
+  }
+
+  List<String> search(String query, {LogCat? cat}) {
+    if (query.isEmpty) return [];
+    final lower = query.toLowerCase();
+    final source = cat != null ? (_byCat[cat] ?? []) : _buffer;
+    return source.where((line) => line.toLowerCase().contains(lower)).toList();
+  }
+
+  List<String> searchByCategory(LogCat cat, {String? query}) {
+    final lines = _byCat[cat] ?? [];
+    if (query == null || query.isEmpty) return List.unmodifiable(lines);
+    final lower = query.toLowerCase();
+    return lines.where((l) => l.toLowerCase().contains(lower)).toList();
+  }
+
+  @override
+  void dispose() {
+    _pendingNotify?.cancel();
+    _pendingNotify = null;
+    super.dispose();
   }
 }

@@ -253,6 +253,7 @@ class BackupService {
               temperature: cfg.temperature,
               topP: cfg.topP,
               maxTokens: cfg.maxTokens,
+              templateId: cfg.templateId,
               cachedModels: cfg.cachedModels,
             );
       await _storage.saveApiConfig(toSave);
@@ -289,6 +290,11 @@ class BackupService {
               enable20sCheck: conv.enable20sCheck,
               contextAuto: conv.contextAuto,
               autoCompress: conv.autoCompress,
+              isPinned: conv.isPinned,
+              reactEnabled: conv.reactEnabled,
+              reactAutoMode: conv.reactAutoMode,
+              reactMaxRounds: conv.reactMaxRounds,
+              reasoningEffort: conv.reasoningEffort,
               updatedAt: conv.updatedAt,
               createdAt: conv.createdAt,
             );
@@ -310,6 +316,9 @@ class BackupService {
               role: msg.role,
               content: msg.content,
               createdAt: msg.createdAt,
+              modelName: msg.modelName,
+              retryOf: msg.retryOf,
+              retryIndex: msg.retryIndex,
             );
       // 消息附件列表是非 final 字段，复制过来
       // v1.6.8 修复 Bug#2：toSave IS msg 时 toSave.attachments 和 msg.attachments 是同一对象，
@@ -317,6 +326,10 @@ class BackupService {
       // 导入任何带附件消息都会崩溃。用 identical 守卫避免自引用。
       if (!identical(toSave, msg)) {
         toSave.attachments.addAll(msg.attachments);
+        toSave.reasoningSteps.addAll(msg.reasoningSteps);
+        toSave.promptTokens = msg.promptTokens;
+        toSave.completionTokens = msg.completionTokens;
+        toSave.totalTokens = msg.totalTokens;
       }
       // v1.4.3 修复 Bug #1（教训#30）：绕过 saveMessage 直接 db.insert
       // saveMessage 会更新 conversation.updatedAt 为 NOW → 导入后对话排序错乱
@@ -376,6 +389,7 @@ class BackupService {
         virusTotalApiKey: webSearchCfg.virusTotalApiKey,
         enableVirusTotalScan: webSearchCfg.enableVirusTotalScan,
         mobsfApiKey: webSearchCfg.mobsfApiKey,
+        biometricLockEnabled: webSearchCfg.biometricLockEnabled,
       );
       await _storage.saveWebSearchConfig(merged);
     }
@@ -397,7 +411,7 @@ class BackupService {
         }
         final metadata =
             PluginMetadata.fromMap(Map<String, dynamic>.from(decodedMetadata));
-        if (metadata.kind == PluginKind.mcpRemote) {
+        if (metadata.kind.isRemote) {
           InstalledMcpConfig.fromJson(metadata.extra);
           sanitized['enabled'] = 0;
         }
@@ -411,7 +425,7 @@ class BackupService {
           final s = dynEnabled.trim().toLowerCase();
           sanitized['enabled'] =
               (s == '1' || s == 'true' || s == 'yes' || s == 'on') ? 1 : 0;
-        } else if (metadata.kind != PluginKind.mcpRemote) {
+        } else if (!metadata.kind.isRemote) {
           sanitized['enabled'] = 1; // 兜底：默认启用，避免导入后全是 0 导致插件全禁用
         }
         // installedAt 容错：确保 int（毫秒）

@@ -181,7 +181,6 @@ class _SourceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final isZh = AppLocalizations.of(context).locale.languageCode == 'zh';
-    final bool isDark = Theme.of(context).brightness == Brightness.dark;
 
     late final String badgeLabel;
     late final BoxDecoration badge;
@@ -191,42 +190,30 @@ class _SourceCard extends StatelessWidget {
       case SourceTrustLevel.official:
         badgeLabel = isZh ? '官方' : 'Official';
         badge = BoxDecoration(
-          color: isDark
-              ? Colors.green.withValues(alpha: 0.18)
-              : Colors.green.shade50,
+          color: colorScheme.primaryContainer.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-              color: isDark
-                  ? Colors.green.withValues(alpha: 0.5)
-                  : Colors.green.shade200),
+              color: colorScheme.primary.withValues(alpha: 0.4)),
         );
-        badgeColor = isDark ? Colors.green.shade300 : Colors.green.shade800;
+        badgeColor = colorScheme.primary;
       case SourceTrustLevel.trustedThirdParty:
         badgeLabel = isZh ? '可信第三方' : 'Trusted';
         badge = BoxDecoration(
-          color: isDark
-              ? Colors.amber.withValues(alpha: 0.2)
-              : Colors.amber.shade50,
+          color: colorScheme.tertiaryContainer.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-              color: isDark
-                  ? Colors.amber.withValues(alpha: 0.5)
-                  : Colors.amber.shade200),
+              color: colorScheme.tertiary.withValues(alpha: 0.4)),
         );
-        badgeColor = isDark ? Colors.amber.shade300 : Colors.amber.shade900;
+        badgeColor = colorScheme.tertiary;
       case SourceTrustLevel.unknown:
         badgeLabel = isZh ? '未知' : 'Unknown';
         badge = BoxDecoration(
-          color: isDark
-              ? Colors.red.withValues(alpha: 0.18)
-              : Colors.red.shade50,
+          color: colorScheme.errorContainer.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-              color: isDark
-                  ? Colors.red.withValues(alpha: 0.55)
-                  : Colors.red.shade200),
+              color: colorScheme.error.withValues(alpha: 0.35)),
         );
-        badgeColor = isDark ? Colors.red.shade300 : Colors.red.shade800;
+        badgeColor = colorScheme.error;
     }
 
     return Container(
@@ -293,23 +280,17 @@ class _SourceCard extends StatelessWidget {
               padding:
                   const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                color: isDark
-                    ? Colors.amber.withValues(alpha: 0.18)
-                    : Colors.amber.shade50,
+                color: colorScheme.tertiaryContainer.withValues(alpha: 0.4),
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
-                  color: isDark
-                      ? Colors.amber.withValues(alpha: 0.5)
-                      : Colors.amber.shade300,
+                  color: colorScheme.tertiary.withValues(alpha: 0.4),
                 ),
               ),
               child: Row(
                 children: [
                   Icon(Icons.warning_amber_rounded,
                       size: 16,
-                      color: isDark
-                          ? Colors.amber.shade300
-                          : Colors.amber.shade900),
+                      color: colorScheme.tertiary),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
@@ -321,9 +302,7 @@ class _SourceCard extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: isDark
-                            ? Colors.amber.shade200
-                            : Colors.amber.shade900,
+                        color: colorScheme.tertiary,
                       ),
                     ),
                   ),

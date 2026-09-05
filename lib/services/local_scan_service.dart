@@ -2,6 +2,7 @@
 ///
 /// 纯 Dart 静态规则引擎，零部署、零 API Key、离线可用。
 /// 用于 Skill (SKILL.md) 和 MCP 配置的安装前安全审查。
+library local_scan_service;
 ///
 /// 设计：
 ///   1) 内置规则库（高置信度、低误报起步，逐步扩充）
@@ -368,33 +369,82 @@ class LocalScanService {
       return _mergeRules(builtin, _remoteRulesCache!);
     }
 
-    try {
-      final response = await http
-          .get(Uri.parse(rulesUrl.trim()))
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
+    final trimmedUrl = rulesUrl.trim();
+    if (!_isSafePublicUrl(trimmedUrl)) {
+      _logger.warn('远程规则 URL 未通过安全校验，回落内置规则', tag: 'LocalScan');
+      return builtin;
+    }
+
+    // v1.7.30: 先尝试直连，失败后自动尝试 jsdelivr 镜像（raw.githubusercontent.com 在部分地区被墙）
+    final urls = [trimmedUrl, _jsdelivrMirror(trimmedUrl)].whereType<String>().toList();
+    for (final url in urls) {
+      try {
+        final response = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 10));
+        if (response.statusCode != 200) continue;
         final data = jsonDecode(utf8.decode(response.bodyBytes))
             as Map<String, dynamic>;
         final rulesJson = (data['rules'] as List<dynamic>? ?? [])
             .map((r) =>
                 LocalScanRule.fromJson(r as Map<String, dynamic>? ?? {}))
-            .where((r) => r.id.isNotEmpty && r.pattern.isNotEmpty)
+            .where((r) {
+              if (r.id.isEmpty || r.pattern.isEmpty) return false;
+              if (r.pattern.length > 200) {
+                _logger.warn('远程规则 ${r.id} 正则过长(${r.pattern.length}字符)，已跳过',
+                    tag: 'LocalScan');
+                return false;
+              }
+              return true;
+            })
             .toList();
+        final disabledIds = (data['disableBuiltin'] as List<dynamic>? ?? [])
+            .map((e) => e.toString())
+            .take(5)
+            .toSet();
         _remoteRulesCache = rulesJson;
         _remoteRulesFetchedAt = DateTime.now();
         _logger.info('远程规则拉取成功: ${rulesJson.length} 条 (v${data['version']})',
             tag: 'LocalScan');
-        return _mergeRules(builtin, rulesJson,
-            disabledIds: (data['disableBuiltin'] as List<dynamic>? ?? [])
-                .map((e) => e.toString())
-                .toSet());
+        return _mergeRules(builtin, rulesJson, disabledIds: disabledIds);
+      } catch (e) {
+        _logger.warn('远程规则拉取异常($url): $e', tag: 'LocalScan');
       }
-      _logger.warn('远程规则拉取失败: HTTP ${response.statusCode}，回落内置规则',
-          tag: 'LocalScan');
-    } catch (e) {
-      _logger.warn('远程规则拉取异常: $e，回落内置规则', tag: 'LocalScan');
     }
+    _logger.warn('远程规则拉取失败，回落内置规则', tag: 'LocalScan');
     return builtin;
+  }
+
+  /// 将 raw.githubusercontent.com URL 转换为 fastly.jsdelivr.net 镜像。
+  static String? _jsdelivrMirror(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host != 'raw.githubusercontent.com') return null;
+    final segs = uri.pathSegments;
+    if (segs.length < 4) return null;
+    final owner = segs[0];
+    final repo = segs[1];
+    final branch = segs[2];
+    final filePath = segs.sublist(3).join('/');
+    return 'https://fastly.jsdelivr.net/gh/$owner/$repo@$branch/$filePath';
+  }
+
+  static bool _isSafePublicUrl(String url) {
+    try {
+      final uri = Uri.parse(url);
+      final host = uri.host;
+      if (uri.scheme != 'https') return false;
+      if (RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(host)) {
+        final parts = host.split('.').map(int.parse).toList();
+        if (parts[0] == 10) return false;
+        if (parts[0] == 172 && parts[1] >= 16 && parts[1] <= 31) return false;
+        if (parts[0] == 192 && parts[1] == 168) return false;
+        if (parts[0] == 127) return false;
+        if (parts[0] == 169 && parts[1] == 254) return false;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// 合并规则：远程同 ID 覆盖内置；disableBuiltin 中的内置规则被禁用；
@@ -425,5 +475,41 @@ class LocalScanService {
   static void clearCache() {
     _remoteRulesCache = null;
     _remoteRulesFetchedAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastSyncStatus = null;
+  }
+
+  // ==========================================================================
+  // 自动同步状态（P2-3）
+  // ==========================================================================
+
+  static DateTime? _lastSyncTime;
+  static String? _lastSyncStatus;
+
+  static DateTime? get lastSyncTime => _lastSyncTime;
+  static String? get lastSyncStatus => _lastSyncStatus;
+
+  /// 手动触发远程规则同步（从 URL 拉取并缓存）
+  static Future<({bool ok, String message})> prefetchRules(String rulesUrl) async {
+    if (rulesUrl.trim().isEmpty) {
+      _lastSyncStatus = 'empty_url';
+      return (ok: false, message: 'URL is empty');
+    }
+    clearCache();
+    try {
+      await _getEffectiveRules(rulesUrl);
+      final remoteCount = _remoteRulesCache?.length ?? 0;
+      _lastSyncTime = DateTime.now();
+      if (remoteCount > 0) {
+        _lastSyncStatus = 'ok';
+        return (ok: true, message: 'Synced $remoteCount remote rules');
+      } else {
+        _lastSyncStatus = 'ok_builtin_only';
+        return (ok: true, message: 'No remote rules, using builtin only');
+      }
+    } catch (e) {
+      _lastSyncTime = DateTime.now();
+      _lastSyncStatus = 'error';
+      return (ok: false, message: 'Sync failed: $e');
+    }
   }
 }

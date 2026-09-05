@@ -59,7 +59,7 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
       LogCat.error:    0xFFF44336, // 红
       LogCat.perf:     0xFFE91E63, // 粉
     };
-    return Color(colors[c] ?? 0xFF607D8B).withOpacity(0.9);
+    return Color(colors[c] ?? 0xFF607D8B).withValues(alpha: 0.9);
   }
 
   @override
@@ -87,7 +87,7 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
             icon: const Icon(Icons.copy_all_outlined),
             onPressed: () async {
               await Clipboard.setData(ClipboardData(text: text));
-              if (mounted) {
+              if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text(l.tr('copied'))),
                 );
@@ -135,7 +135,7 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
                           '${l.locale.languageCode == 'zh' ? c.labelCN : c.labelEN} ($count)'),
                       selected: _filter == c,
                       onSelected: (_) => setState(() => _filter = c),
-                      selectedColor: color.withOpacity(0.25),
+                      selectedColor: color.withValues(alpha: 0.25),
                     ),
                   );
                 }),

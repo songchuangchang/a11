@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:open_filex/open_filex.dart';
 import '../l10n/app_localizations.dart';
 import '../services/app_download_service.dart';
+import '../services/biometric_service.dart';
 import '../services/logger_service.dart';
 
 class DownloadProgressDialog extends StatefulWidget {
@@ -101,7 +102,7 @@ class _DownloadProgressDialogState extends State<DownloadProgressDialog> {
                     )),
           ] else if (complete) ...[
             Icon(Icons.check_circle_rounded,
-                size: 64, color: Colors.green.shade500),
+                size: 64, color: colorScheme.primary),
             const SizedBox(height: 12),
             Text(task.fileName,
                 maxLines: 2,
@@ -121,13 +122,13 @@ class _DownloadProgressDialogState extends State<DownloadProgressDialog> {
                     )),
           ] else ...[
             Icon(Icons.error_outline_rounded,
-                size: 64, color: Colors.red.shade400),
+                size: 64, color: colorScheme.error),
             const SizedBox(height: 12),
             Text(task.error ?? 'Unknown error',
                 maxLines: 5,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: Colors.red.shade300,
+                  color: colorScheme.error,
                   fontWeight: FontWeight.w500,
                 )),
           ],
@@ -150,11 +151,14 @@ class _DownloadProgressDialogState extends State<DownloadProgressDialog> {
           TextButton.icon(
             onPressed: () async {
               try {
-                await OpenFilex.open(task.saveDir);
+                await BiometricService.guardActivityTransition(
+                  () => OpenFilex.open(task.saveDir),
+                  fallbackDuration: const Duration(seconds: 120),
+                );
               } catch (e) {
                 _log.warn('[Download] Open folder failed: $e');
               }
-              if (mounted) Navigator.pop(context);
+              if (context.mounted) Navigator.pop(context);
             },
             icon: const Icon(Icons.folder_rounded),
             label: Text(isZh ? '打开文件夹' : 'Open Folder'),
@@ -162,12 +166,15 @@ class _DownloadProgressDialogState extends State<DownloadProgressDialog> {
           FilledButton.icon(
             onPressed: () async {
               try {
-                final r = await OpenFilex.open(task.fullPath,
-                    type: 'application/vnd.android.package-archive');
+                final r = await BiometricService.guardActivityTransition(
+                  () => OpenFilex.open(task.fullPath,
+                      type: 'application/vnd.android.package-archive'),
+                  fallbackDuration: const Duration(seconds: 120),
+                );
                 _log.info('[Download] Open APK result: type=${r.type} message=${r.message}');
               } catch (e, st) {
                 _log.error('[Download] Open APK failed', error: e, stack: st, tag: 'OpenAPK');
-                if (mounted) {
+                if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                     content: Text(
                         isZh ? '安装器打不开，请去文件管理器找：\n${task.fullPath}' : 'Installer failed to open, find it in your file manager:\n${task.fullPath}',
@@ -175,7 +182,7 @@ class _DownloadProgressDialogState extends State<DownloadProgressDialog> {
                   ));
                 }
               }
-              if (mounted) Navigator.pop(context);
+              if (context.mounted) Navigator.pop(context);
             },
             icon: const Icon(Icons.install_mobile_rounded),
             label: Text(isZh ? '安装' : 'Install APK'),

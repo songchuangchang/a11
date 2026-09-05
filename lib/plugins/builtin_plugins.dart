@@ -15,6 +15,7 @@ List<ReActPlugin> get builtinReActPlugins => [
       AskUserPlugin(),
       SelfCheckPlugin(),
       AnswerPlugin(),
+      DeepResearchPlugin(),
     ];
 
 PluginRegistry createBuiltinPluginRegistry({StorageService? storage}) {
@@ -59,7 +60,8 @@ class SearchPlugin extends ReActPlugin {
       );
 
   @override
-  Future<void> handle(BuildContext context, PluginContext pc, Map<String, dynamic> attrs) async {
+  Future<void> handle(BuildContext context, PluginContext pc,
+      Map<String, dynamic> attrs) async {
     // v1.7.4 fix: react_parser 把 query 存在 content 字段，不是 query 字段
     final q = (attrs['content'] as String? ?? '').trim();
     final rawDepth = attrs['depth'] as String? ?? 'auto';
@@ -67,17 +69,22 @@ class SearchPlugin extends ReActPlugin {
       pc.addReasoningStep('search', '搜索关键词为空，已忽略');
       return;
     }
-    final isZh = pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
+    final isZh =
+        pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
     // tavilyDepth 直接用字符串（basic / advanced），其他值让 searchGeneral 走默认
     final depthLabel = switch (rawDepth.toLowerCase()) {
       'advanced' => isZh ? '高级' : 'Adv',
       'basic' => isZh ? '基础' : 'Basic',
       _ => isZh ? '自动' : 'Auto',
     };
-    pc.addReasoningStep('search',
-        isZh ? '🔍 正在搜索「$q」（深度：$depthLabel）...' : '🔍 Searching for "$q" (depth: $depthLabel)...');
+    pc.addReasoningStep(
+        'search',
+        isZh
+            ? '🔍 正在搜索「$q」（深度：$depthLabel）...'
+            : '🔍 Searching for "$q" (depth: $depthLabel)...');
     final stopwatch = Stopwatch()..start();
-    final cfg = (rawDepth.toLowerCase() == 'advanced' || rawDepth.toLowerCase() == 'basic')
+    final cfg = (rawDepth.toLowerCase() == 'advanced' ||
+            rawDepth.toLowerCase() == 'basic')
         ? pc.webSearchCfg.copyWith(tavilySearchDepth: rawDepth.toLowerCase())
         : pc.webSearchCfg;
     // WebSearchService 是静态类，searchGeneral 返回 List<SearchResultItem>
@@ -87,18 +94,33 @@ class SearchPlugin extends ReActPlugin {
     stopwatch.stop();
     final summary = hits == 0
         ? (isZh ? '未找到有效结果' : 'No results')
-        : (isZh ? '命中 ${hits} 条' : 'Got $hits results');
-    pc.markLastSearchResult(hits, latency: stopwatch.elapsed, summary: summary);
+        : (isZh ? '命中 $hits 条' : 'Got $hits results');
+    // v1.7.31：搜索结果摘要丰富化，包含前 10 条标题+URL 供用户查看
+    final visibleSummary = StringBuffer();
+    visibleSummary.write(summary);
+    if (hits > 0) {
+      visibleSummary.writeln();
+      for (int i = 0; i < results.length && i < 10; i++) {
+        final r = results[i];
+        visibleSummary.writeln('${i + 1}. ${r.title}');
+        visibleSummary.writeln('   ${r.url}');
+      }
+    }
+    pc.markLastSearchResult(hits,
+        latency: stopwatch.elapsed, summary: visibleSummary.toString());
     final isVerbose = pc.webSearchCfg.verboseLogging;
     if (isVerbose) {
-      pc.logger.verbose('[ReAct-Search] query=$q depth=$rawDepth hits=$hits latency=${stopwatch.elapsedMilliseconds}ms');
+      pc.logger.verbose(
+          '[ReAct-Search] query=$q depth=$rawDepth hits=$hits latency=${stopwatch.elapsedMilliseconds}ms');
       for (int i = 0; i < results.length && i < 3; i++) {
         final r = results[i];
         pc.logger.verbose('  #${i + 1}  ${r.title}  ${r.url}');
       }
     }
     // 用 static WebSearchService.formatAsSearchContext 把搜索结果拼给 AI
-    final formatted = hits > 0 ? WebSearchService.formatAsSearchContext(results, cfg, query: q) : '';
+    final formatted = hits > 0
+        ? WebSearchService.formatAsSearchContext(results, cfg, query: q)
+        : '';
     final sb = StringBuffer();
     sb.writeln('---TOOL RESULT START (search)---');
     sb.writeln('query: ${_xmlEscape(q)}');
@@ -108,11 +130,12 @@ class SearchPlugin extends ReActPlugin {
     if (formatted.isNotEmpty) sb.writeln(formatted);
     sb.writeln('---TOOL RESULT END (search)---');
     final userMsgContent = sb.toString();
-    final rawResp = pc.rawResp ?? '';
-    final amsg = pc.assistantMsg;
-    // ChatMessage 没有 copyWith，直接修改 assistantMsg 内容并写入 workingMessages
-    amsg.content = rawResp;
-    final convId = pc.userMsg?.conversationId ?? amsg.conversationId;
+    // v1.7.35 修复（用户第7条反馈）：不再把 rawResp 写进 assistantMsg.content。
+    // 此前 amsg.content = rawResp 会把含 <thinking> 的原始输出直接显示在
+    // 答案气泡里（"第一轮思考过程出现在结论中"），且会被中途节流保存持久化。
+    // 搜索轮的 UI 应只显示思考面板（reasoningSteps），content 留给最终 <answer>。
+    final convId =
+        pc.userMsg?.conversationId ?? pc.assistantMsg.conversationId;
     final u = ChatMessage.create(
       conversationId: convId,
       role: MessageRole.user,
@@ -127,7 +150,9 @@ class DownloadPlugin extends ReActPlugin {
   String get triggerType => 'download';
 
   @override
-  RegExp? get legacyTrigger => RegExp(r'(帮我|我要|给我)?下载\s*(安装包|apk)?\s*[：:]?\s*(.+?)(安装包|apk)?\s*[。.!！?？]?$', caseSensitive: false);
+  RegExp? get legacyTrigger => RegExp(
+      r'(帮我|我要|给我)?下载\s*(安装包|apk)?\s*[：:]?\s*(.+?)(安装包|apk)?\s*[。.!！?？]?$',
+      caseSensitive: false);
 
   @override
   PluginSource get source => PluginSource.system;
@@ -138,7 +163,8 @@ class DownloadPlugin extends ReActPlugin {
         name: '文件与应用下载',
         version: '1.6.8',
         author: 'Nexus Team',
-        description: '支持 APP 搜索下载（catalog/GitHub/联网）、通用文件按类型搜索下载、URL 直链下载三种子模式。',
+        description:
+            '支持 APP 搜索下载（catalog/GitHub/联网）、通用文件按类型搜索下载、URL 直链下载三种子模式。',
         homepage: 'https://nexus.local/plugins/download',
         minAppVersion: '1.6.8',
         tags: ['内置', '下载', '文件', 'APP'],
@@ -147,10 +173,12 @@ class DownloadPlugin extends ReActPlugin {
 - 使用场景：用户请求下载 APP 安装包、图片、视频、文档、PDF、压缩包等任何需要"保存到本地文件"的内容。
 - ⚠️ 核心规则：只要识别出下载意图，【必须】输出 <download> 标签触发下载流程。【禁止】用 <answer> 文字回复"请去官网下载"代替——那样用户什么也下载不到。
 - 协议格式：<download intent="true|false" canonical="应用通用名" keywords="关键词1,关键词2,关键词3" domains="官域1,官域2" platform="android|pc" url="直链URL" type="app|pdf|mp4|jpg|doc|any" query="文件名关键词" />
+- 字段类型与默认值：所有字段都是 XML 属性字符串；intent 默认 false，仅 true/1/yes/是视为执行下载；canonical、keywords、domains、url、query 默认空字符串；platform 缺省默认 android，只接受 android 或 pc；type 缺省 app，type="download" 也按 app 处理。keywords 与 domains 使用英文逗号或中文逗号分隔。
 - 三种互斥调用方式（每次只走一条）：
-  ① URL 直链下载 → 填 url="https://..."，其他字段默认即可。
-  ② 通用文件搜索下载 → type != "app" 且 query 非空（例：type="pdf" query="2026 Flutter 开发手册"）。
-  ③ APP 搜索下载 → type="app"（或不写 type），intent="true"，canonical=应用名、keywords=多搜索关键词、domains=官域列表、platform=android 默认、pc 电脑版写 pc。
+  ① URL 直链下载：url 为以 http 开头的 URL；url 优先，其他字段可省略，type 默认 app。
+  ② 通用文件搜索下载：type 不能为 app 且 query 非空；type 使用文件类型字符串（如 pdf、mp4、jpg、doc、any），query 是非空文件名或检索关键词。
+  ③ APP 搜索下载：type="app" 或省略 type，intent="true"，canonical 填应用通用名，keywords 填一个或多个检索关键词，domains 填官方域名（可为空），platform 填 android 或 pc。
+- 信息不足策略：若应用名、文件名、直链 URL 或其他必要下载目标不明确，先输出 <ask_user> 补齐信息，再输出 <download>；不要用 <answer> 代替。用户未说明平台不算信息不足，直接使用 platform="android"。只有用户明确要求选择平台，或明确存在 Android/PC 平台分歧且需要用户决定时，才输出 <ask_user> 询问平台。
 - 示例 1：下载微信 APP 安卓版
   <download intent="true" canonical="微信" keywords="微信,WeChat APK,微信安卓版" domains="weixin.qq.com" platform="android" />
 - 示例 2：2026 年 PDF 报告"年度技术白皮书"
@@ -164,13 +192,13 @@ class DownloadPlugin extends ReActPlugin {
       );
 
   @override
-  Future<void> handle(BuildContext context, PluginContext pc, Map<String, dynamic> attrs) async {
-    final isZh = pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
+  Future<void> handle(BuildContext context, PluginContext pc,
+      Map<String, dynamic> attrs) async {
+    final isZh =
+        pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
     final dlUrl = (attrs['url'] as String? ?? '').trim();
     final userMsg = pc.userMsg;
     final amsg = pc.assistantMsg;
-    final rawResp = pc.rawResp ?? '';
-
     // v1.6.9 build42：legacyTrigger（用户输入纯文本"下载微信"，禁用 ReAct 老流程或 registry dispatch legacy）
     //   从 attrs['legacyMatch'] RegExpMatch 捕获组解析 keyword，而不是依赖 XML 属性。
     //   DownloadPlugin.legacyTrigger = (帮我|我要|给我)?下载\s*(安装包|apk)?\s*[：:]?\s*(.+?)(安装包|apk)?\s*[。.!！?？]?$
@@ -180,15 +208,24 @@ class DownloadPlugin extends ReActPlugin {
     if (legacy != null) {
       final g = legacy.group(3)?.trim() ?? '';
       // 去掉首尾的"安装包/apk/应用"后缀残留
-      legacyKeyword = g.replaceAllMapped(RegExp(r'^(安装包|apk|应用)\s*|\s*(安装包|apk|应用)$', caseSensitive: false), (_) => '').trim();
+      legacyKeyword = g
+          .replaceAllMapped(
+              RegExp(r'^(安装包|apk|应用)\s*|\s*(安装包|apk|应用)$',
+                  caseSensitive: false),
+              (_) => '')
+          .trim();
     }
 
     if (dlUrl.isNotEmpty && dlUrl.startsWith('http')) {
       pc.setAnswered(true);
       pc.logger.info('[DL] ReAct trigger direct URL: $dlUrl');
-      pc.addReasoningStep('download',
-          isZh ? '📥 确认直链下载：${_ellipse(dlUrl, 80)}' : '📥 Direct download: ${_ellipse(dlUrl, 80)}');
-      amsg.content = rawResp;
+      pc.addReasoningStep(
+          'download',
+          isZh
+              ? '📥 确认直链下载：${_ellipse(dlUrl, 80)}'
+              : '📥 Direct download: ${_ellipse(dlUrl, 80)}');
+      // v1.7.35 修复：不写 amsg.content = rawResp（思考会漏进结论），
+      // 下载流程随后会自行设置干净的进度/结果文案。
       await pc.genericDownload(dlUrl, amsg);
       return;
     }
@@ -196,17 +233,23 @@ class DownloadPlugin extends ReActPlugin {
     // v1.7.9 (M15 修复)：优先读 type_attr
     // parser 片段自带 'type': 'download' 键（片段类型），旧写法 `attrs['type'] ?? attrs['type_attr']`
     // 永远先命中 'download' → AI 显式输出的 type="pdf|mp4|..." 永不生效，文件类型过滤全部失效
-    final dlType = (attrs['type_attr'] as String? ?? attrs['type'] as String? ?? 'app').toLowerCase().trim();
+    final dlType =
+        (attrs['type_attr'] as String? ?? attrs['type'] as String? ?? 'app')
+            .toLowerCase()
+            .trim();
     final dlQuery = (attrs['query'] as String? ?? '').trim();
 
     // 'download' 是片段类型而非文件类型 → 视为 app 下载
     final effectiveDlType = dlType == 'download' ? 'app' : dlType;
 
     if (effectiveDlType != 'app' && dlQuery.isNotEmpty) {
-      pc.logger.info('[DL] ReAct trigger file search: type=$effectiveDlType query=$dlQuery');
-      pc.addReasoningStep('download',
-          isZh ? '📥 确认是「$effectiveDlType 文件」下载请求，搜索「$dlQuery」...' : '📥 Download file type=$effectiveDlType query="$dlQuery"...');
-      amsg.content = rawResp;
+      pc.logger.info(
+          '[DL] ReAct trigger file search: type=$effectiveDlType query=$dlQuery');
+      pc.addReasoningStep(
+          'download',
+          isZh
+              ? '📥 确认是「$effectiveDlType 文件」下载请求，搜索「$dlQuery」...'
+              : '📥 Download file type=$effectiveDlType query="$dlQuery"...');
       final userText = userMsg?.content ?? dlQuery;
       await pc.presentFileSources(
         userText: userText,
@@ -219,10 +262,15 @@ class DownloadPlugin extends ReActPlugin {
     }
 
     final intentRaw = (attrs['intent'] as String? ?? '').toLowerCase().trim();
-    final canonical = (attrs['canonical'] as String? ?? attrs['content'] as String? ?? '').trim();
+    final canonical =
+        (attrs['canonical'] as String? ?? attrs['content'] as String? ?? '')
+            .trim();
     final keywordsRaw = (attrs['keywords'] as String? ?? '').trim();
     final domainsRaw = (attrs['domains'] as String? ?? '').trim();
-    final platform = ((attrs['platform'] as String? ?? '').trim().isNotEmpty ? attrs['platform'] as String : 'android').toLowerCase();
+    final platform = ((attrs['platform'] as String? ?? '').trim().isNotEmpty
+            ? attrs['platform'] as String
+            : 'android')
+        .toLowerCase();
     final altKeywords = keywordsRaw
         .split(RegExp(r'[,，]'))
         .map((e) => e.trim())
@@ -242,7 +290,10 @@ class DownloadPlugin extends ReActPlugin {
       keyword = legacyKeyword;
     }
     // legacy 场景下默认 intent=true（因为 legacyTrigger 匹配到了就代表用户明确有下载意图）
-    var intentTrue = intentRaw == 'true' || intentRaw == '1' || intentRaw == 'yes' || intentRaw == '是';
+    var intentTrue = intentRaw == 'true' ||
+        intentRaw == '1' ||
+        intentRaw == 'yes' ||
+        intentRaw == '是';
     if (!intentTrue && legacy != null && keyword.isNotEmpty) {
       intentTrue = true;
     }
@@ -259,9 +310,9 @@ class DownloadPlugin extends ReActPlugin {
         : (isPC
             ? '📥 Confirmed APP download "$keyword" (PC), preparing sources...'
             : '📥 Confirmed APP download "$keyword" (Android), preparing sources...');
-    pc.logger.info('[DL] ReAct trigger app search: keyword=$keyword platform=$platform alt=${altKeywords.length} domains=${officialDomains.length}');
+    pc.logger.info(
+        '[DL] ReAct trigger app search: keyword=$keyword platform=$platform alt=${altKeywords.length} domains=${officialDomains.length}');
     pc.addReasoningStep('download', thinkLabel);
-    amsg.content = rawResp;
     await pc.presentAppDownloadSources(
       userText: userText,
       keyword: keyword,
@@ -310,11 +361,17 @@ class AskUserPlugin extends ReActPlugin {
       );
 
   @override
-  Future<void> handle(BuildContext context, PluginContext pc, Map<String, dynamic> attrs) async {
-    final isZh = pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
+  Future<void> handle(BuildContext context, PluginContext pc,
+      Map<String, dynamic> attrs) async {
+    final isZh =
+        pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
     final content = (attrs['content'] as String? ?? '').trim();
     if (content.isEmpty) return;
-    final parts = content.split('||').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    final parts = content
+        .split('||')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
     if (parts.isEmpty) return;
     var questionText = parts.first;
     var options = parts.length > 1 ? parts.sublist(1) : <String>[];
@@ -333,22 +390,25 @@ class AskUserPlugin extends ReActPlugin {
             tag: 'Plugin');
       }
     }
-    final pcContent = '$questionText${options.isNotEmpty ? ' [${options.join(' / ')}]' : ''}';
+    final pcContent =
+        '$questionText${options.isNotEmpty ? ' [${options.join(' / ')}]' : ''}';
     pc.addReasoningStep('ask_user', pcContent);
-    pc.appendReasoning(isZh ? '❓ AI 想问你：$questionText' : '❓ AI asks: $questionText');
-    final rawResp = pc.rawResp ?? '';
-    final amsg = pc.assistantMsg;
-    amsg.content = rawResp;
+    pc.appendReasoning(
+        isZh ? '❓ AI 想问你：$questionText' : '❓ AI asks: $questionText');
     final reply = await pc.showAskUser(questionText, options);
     final finalReply = (reply == null || reply.trim().isEmpty)
         ? (isZh ? '(用户跳过了这个问题)' : '(User skipped this question)')
         : reply;
-    pc.appendReasoning(isZh ? '📩 你的回复：$finalReply' : '📩 Your reply: $finalReply');
-    final convId = pc.userMsg?.conversationId ?? amsg.conversationId;
+    pc.appendReasoning(
+        isZh ? '📩 你的回复：$finalReply' : '📩 Your reply: $finalReply');
+    final convId =
+        pc.userMsg?.conversationId ?? pc.assistantMsg.conversationId;
     final pcRole = ChatMessage.create(
       conversationId: convId,
       role: MessageRole.user,
-      content: isZh ? '（用户回复 AI 的提问）：$finalReply' : '(Reply to AI\'s question): $finalReply',
+      content: isZh
+          ? '（用户回复 AI 的提问）：$finalReply'
+          : '(Reply to AI\'s question): $finalReply',
     );
     pc.addMessage(pcRole);
   }
@@ -387,8 +447,10 @@ class SelfCheckPlugin extends ReActPlugin {
       );
 
   @override
-  Future<void> handle(BuildContext context, PluginContext pc, Map<String, dynamic> attrs) async {
-    final isZh = pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
+  Future<void> handle(BuildContext context, PluginContext pc,
+      Map<String, dynamic> attrs) async {
+    final isZh =
+        pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
     final cont = (attrs['continue'] as String? ?? 'true').toLowerCase().trim();
     final reason = (attrs['reason'] as String? ?? '').trim();
     final shouldStop = cont != 'true';
@@ -398,10 +460,15 @@ class SelfCheckPlugin extends ReActPlugin {
     final reasonLabel = reason.isNotEmpty ? '（$reason）' : '';
     pc.addReasoningStep('self_check', '$actionLabel$reasonLabel');
     pc.appendReasoning(isZh
-        ? (shouldStop ? '⏹️ AI 自检判定：应终止思考。$reasonLabel' : '✅ AI 自检判定：继续思考。$reasonLabel')
-        : (shouldStop ? '⏹️ Self-check: STOP thinking. $reasonLabel' : '✅ Self-check: CONTINUE thinking. $reasonLabel'));
+        ? (shouldStop
+            ? '⏹️ AI 自检判定：应终止思考。$reasonLabel'
+            : '✅ AI 自检判定：继续思考。$reasonLabel')
+        : (shouldStop
+            ? '⏹️ Self-check: STOP thinking. $reasonLabel'
+            : '✅ Self-check: CONTINUE thinking. $reasonLabel'));
     if (shouldStop) {
-      pc.logger.info('[Chat] AI self-check said STOP (reason: ${reason.isEmpty ? "none" : reason})');
+      pc.logger.info(
+          '[Chat] AI self-check said STOP (reason: ${reason.isEmpty ? "none" : reason})');
       pc.requestStopLoop();
     }
   }
@@ -423,7 +490,8 @@ class AnswerPlugin extends ReActPlugin {
         name: '最终答案输出',
         version: '1.6.8',
         author: 'Nexus Team',
-        description: '当 AI 认为无需进一步思考/搜索时，输出 <answer> 标签结束 ReAct 循环并将正文作为最终回复给用户。',
+        description:
+            '当 AI 认为无需进一步思考/搜索时，输出 <answer> 标签结束 ReAct 循环并将正文作为最终回复给用户。',
         homepage: 'https://nexus.local/plugins/answer',
         minAppVersion: '1.6.8',
         tags: ['内置', '输出', 'ReAct'],
@@ -445,10 +513,22 @@ class AnswerPlugin extends ReActPlugin {
       );
 
   @override
-  Future<void> handle(BuildContext context, PluginContext pc, Map<String, dynamic> attrs) async {
-    final answer = attrs['content'] as String? ?? attrs['answer'] as String? ?? '';
+  Future<void> handle(BuildContext context, PluginContext pc,
+      Map<String, dynamic> attrs) async {
+    var answer =
+        attrs['content'] as String? ?? attrs['answer'] as String? ?? '';
+    // v1.7.36：双保险——剥离混入 <answer> 的思考标签，防止推理过程泄漏进最终答案
+    answer = answer
+        .replaceAll(
+            RegExp(r'<(?:thinking|think)>[\s\S]*?</(?:thinking|think)>',
+                caseSensitive: false),
+            '')
+        .replaceAll(
+            RegExp(r'</?(?:thinking|think)>', caseSensitive: false), '')
+        .trim();
     await pc.saveAssistantContent(force: false);
-    pc.finalizeAnswer(answer, injectedWebSearchCount: pc.totalSearchHits, forceSave: true);
+    pc.finalizeAnswer(answer,
+        injectedWebSearchCount: pc.totalSearchHits, forceSave: true);
   }
 }
 
@@ -474,21 +554,77 @@ class FallbackUnknownTagPlugin extends ReActPlugin {
       );
 
   @override
-  Future<void> handle(BuildContext context, PluginContext pc, Map<String, dynamic> attrs) async {
+  Future<void> handle(BuildContext context, PluginContext pc,
+      Map<String, dynamic> attrs) async {
     final type = attrs['type'] as String? ?? 'unknown';
-    final snippet = (attrs['content'] as String? ?? attrs['raw'] as String? ?? '').replaceAll('\n', ' ').trim();
-    final preview = snippet.length <= 40 ? snippet : '${snippet.substring(0, 40)}...';
-    final isZh = pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
+    final snippet =
+        (attrs['content'] as String? ?? attrs['raw'] as String? ?? '')
+            .replaceAll('\n', ' ')
+            .trim();
+    final preview =
+        snippet.length <= 40 ? snippet : '${snippet.substring(0, 40)}...';
+    final isZh =
+        pc.userMsg?.content.contains(RegExp(r'[\u4e00-\u9fff]')) ?? true;
     final label = isZh
         ? '未知 ReAct 标签类型：<$type>（预览：$preview）。已忽略。'
         : 'Unknown ReAct tag <$type> (preview: $preview). Ignored.';
     pc.addReasoningStep('unknown_tag', label);
-    pc.logger.warn('[ReAct] Fallback: unknown triggerType=$type preview=$preview');
+    pc.logger
+        .warn('[ReAct] Fallback: unknown triggerType=$type preview=$preview');
   }
 }
 
 String _xmlEscape(String s) {
   return const HtmlEscape().convert(s);
+}
+
+/// v1.7.36：深度研究插件（可开关，默认关闭）。
+/// 这是一个"模式型"插件——AI 不输出它的标签，它的价值在于：
+/// 1. 开启时出现在 AI 工具目录里（AI 知道深度研究模式已激活）；
+/// 2. 开启时联动会话的 deepResearchMode（多专家编排 / 更多轮数 / 更高 MCP 上限）。
+class DeepResearchPlugin extends ReActPlugin {
+  @override
+  String get triggerType => 'deep_research';
+
+  @override
+  RegExp? get legacyTrigger => null;
+
+  @override
+  PluginSource get source => PluginSource.system;
+
+  @override
+  PluginMetadata get metadata => const PluginMetadata(
+        id: PluginRegistry.kDeepResearchPluginId,
+        name: '深度研究',
+        version: '1.7.36',
+        author: 'Nexus Team',
+        description: '深度研究模式：开启后 AI 进行多轮搜索、交叉验证与综合推理，适合复杂调研类问题。全局生效。',
+        minAppVersion: '1.7.36',
+        tags: ['内置', '研究', '多轮'],
+        promptProtocol: '''
+【深度研究模式】已开启：
+- 对复杂问题不要急于一次回答，应按「多轮检索 → 交叉验证 → 综合汇总」的流程工作。
+- 优先使用 depth="advanced" 的搜索，并对同一问题换不同关键词多次检索。
+- 对关键事实至少用两个独立来源交叉验证；来源冲突时向用户说明分歧。
+- 允许更多思考轮次；信息充分前不要输出 <answer>。
+- 最终答案应结构化：先结论，再论据，最后列出信息来源。
+''',
+      );
+
+  @override
+  Future<void> handle(BuildContext context, PluginContext pc,
+      Map<String, dynamic> attrs) async {
+    // 模式型插件：AI 正常不会输出该标签；若输出了则提示它继续用 search/answer 工作
+    pc.addReasoningStep('deep_research', '深度研究模式已激活（无需输出该标签）');
+    final convId =
+        pc.userMsg?.conversationId ?? pc.assistantMsg.conversationId;
+    pc.addMessage(ChatMessage.create(
+      conversationId: convId,
+      role: MessageRole.user,
+      content:
+          '[系统] 深度研究模式已开启，不需要输出 <deep_research> 标签。请直接用 <search> 多轮检索、交叉验证后用 <answer> 给出结构化结论。',
+    ));
+  }
 }
 
 String _ellipse(String s, int max) {

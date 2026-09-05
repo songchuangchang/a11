@@ -18,6 +18,9 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- 通知权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 生物识别锁（local_auth）：API 28+ 用 USE_BIOMETRIC，API <28 需 USE_FINGERPRINT -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
 
     <application
         android:label="Nexus"

@@ -211,9 +211,16 @@ class McpClientService {
   Future<dynamic> toolsCall(
       String endpoint, String tool, Map<String, dynamic> arguments) async {
     _endpoint = _validateEndpoint(endpoint).toString();
-    await _ensureInitialized();
+    // v1.7.16 修复：运行时恢复的插件持有全新 client，_tools 为空会短路白名单校验
+    // （原 `_tools.isNotEmpty &&` 条件在空表时整体为 false，校验被跳过）。
+    // 改为：空表时先 discoverTools 填充 schema，再严格 containsKey 校验。
+    if (_tools.isEmpty) {
+      await discoverTools(endpoint);
+    } else {
+      await _ensureInitialized();
+    }
     if (!RegExp(r'^[A-Za-z0-9_.:/-]{1,128}$').hasMatch(tool) ||
-        (_tools.isNotEmpty && !_tools.containsKey(tool))) {
+        !_tools.containsKey(tool)) {
       throw const FormatException('MCP tool is not in the discovered schema');
     }
     if (jsonEncode(arguments).length > 100000) {

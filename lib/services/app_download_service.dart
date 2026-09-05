@@ -618,102 +618,125 @@ class AppDownloadService extends ChangeNotifier {
     final pageSources = <AppDownloadSource>[]; // 下载页/官网 HTML（宽松保留，标红）
     final seenUrls = <String>{};
 
-    for (final result in searchResults.take(10)) {
-      final url = result.url;
-      if (seenUrls.contains(url)) continue;
-      seenUrls.add(url);
+    // v1.7.26 下载提速：APK-like URL 的 validateUrl/checkReachable 都是网络请求
+    // （每条约 5~10s 超时），原串行循环 10 条最坏要 100s+。改为 Future.wait 并发
+    // 一轮并发验证全部候选，汇总顺序仍按原始结果，来源列表出现速度提升数倍。
+    final scanned = <(String, AppDownloadSource)?>[];
+    final candidates = searchResults.take(10).toList();
+    // v1.7.26 下载提速 v2：全并发 10 个会触发目标站限流/反爬 → 实测只剩 1 条。
+    // 改为限并发 3 分批（每批 Future.wait），既保留提速又避免被限流，来源条数恢复正常。
+    for (var i = 0; i < candidates.length; i += 3) {
+      final batchEnd =
+          (i + 3) < candidates.length ? (i + 3) : candidates.length;
+      final batch = await Future.wait(
+        candidates.sublist(i, batchEnd).map((result) async {
+        final url = result.url;
+        if (!seenUrls.add(url)) return null;
 
-      // v1.5.1：跳过国内应用商店诱导下载页（应用宝/360/豌豆荚/小米/华为/OPPO/vivo/百度等）
-      if (_isBlockedStore(url)) {
-        _logger.info(
-            '[Download] Skip blocked app store URL: $url',
-            tag: 'DL');
-        continue;
-      }
-
-      final lowerUrl = url.toLowerCase();
-      final looksLikeApk = lowerUrl.endsWith('.apk') ||
-          lowerUrl.contains('.apk?') ||
-          lowerUrl.contains('/apk/') ||
-          lowerUrl.contains('download') &&
-              (lowerUrl.contains('cdn') ||
-                  lowerUrl.contains('android') ||
-                  lowerUrl.contains('dldir'));
-
-      // 判断来源可信度（先按域名预判定）
-      final trustLevel = _judgeTrustLevel(url);
-      final sourceName = _extractSourceName(url, result.title);
-      final domain = _extractDomain(url);
-
-      if (looksLikeApk || trustLevel != SourceTrustLevel.unknown) {
-        // 【严格路径】看起来像 APK 直链，或者是官网/可信三方 → 必须验证通过
-        final validateErr = await WebSearchService.validateUrl(url);
-        if (validateErr != null) {
-          _logger.info('[Download] APK-like URL invalid ($validateErr): $url');
-          continue;
-        }
-        apkSources.add(AppDownloadSource(
-          sourceName: sourceName,
-          sourceDomain: domain,
-          trustLevel: trustLevel,
-          version: '搜索结果 · 直链',
-          size: '未知',
-          arch: '未知 (需验证)',
-          downloadUrl: url,
-          changelog:
-              result.snippet.isNotEmpty ? result.snippet : 'Bing 搜索 APK 直链',
-        ));
-        _logger.info('[Download] Valid APK source: $sourceName -> $url');
-      } else {
-        // 【宽松路径】普通下载页 / HTML 页面
-        // v1.3.6：自动 fetch HTML → 解析 .apk 直链 → 升级为正式 APK 源
-        final reachable = await WebSearchService.checkReachable(url);
-        if (!reachable) {
-          _logger.info('[Download] Page unreachable, skip: $url');
-          continue;
-        }
-        // 尝试从下载页 HTML 中提取 .apk 直链
-        final apkDirectUrl = await _fetchAndParseDownloadPage(url);
-        if (apkDirectUrl != null) {
+        // v1.5.1：跳过国内应用商店诱导下载页（应用宝/360/豌豆荚/小米/华为/OPPO/vivo/百度等）
+        if (_isBlockedStore(url)) {
           _logger.info(
-              '[Download] Extracted APK from page: $sourceName -> $apkDirectUrl',
+              '[Download] Skip blocked app store URL: $url',
               tag: 'DL');
-          apkSources.add(AppDownloadSource(
-            sourceName: '$sourceName (页面解析)',
-            sourceDomain: domain,
-            trustLevel: trustLevel, // 继承原域名信任等级
-            version: '搜索结果 · 页面解析',
-            size: '未知',
-            arch: '未知 (需验证)',
-            downloadUrl: apkDirectUrl,
-            referer: url, // 原页面作为 Referer
-            changelog: result.snippet.isNotEmpty
-                ? '${result.snippet}（从下载页自动提取直链）'
-                : '从下载页 HTML 自动提取 APK 直链',
-          ));
+          return null;
+        }
+
+        final lowerUrl = url.toLowerCase();
+        final looksLikeApk = lowerUrl.endsWith('.apk') ||
+            lowerUrl.contains('.apk?') ||
+            lowerUrl.contains('/apk/') ||
+            lowerUrl.contains('download') &&
+                (lowerUrl.contains('cdn') ||
+                    lowerUrl.contains('android') ||
+                    lowerUrl.contains('dldir'));
+
+        // 判断来源可信度（先按域名预判定）
+        final trustLevel = _judgeTrustLevel(url);
+        final sourceName = _extractSourceName(url, result.title);
+        final domain = _extractDomain(url);
+
+        if (looksLikeApk || trustLevel != SourceTrustLevel.unknown) {
+          // 【严格路径】看起来像 APK 直链，或者是官网/可信三方 → 必须验证通过
+          final validateErr = await WebSearchService.validateUrl(url);
+          if (validateErr != null) {
+            _logger.info('[Download] APK-like URL invalid ($validateErr): $url');
+            return null;
+          }
+          _logger.info('[Download] Valid APK source: $sourceName -> $url');
+          return ('apk', AppDownloadSource(
+                sourceName: sourceName,
+                sourceDomain: domain,
+                trustLevel: trustLevel,
+                version: '搜索结果 · 直链',
+                size: '未知',
+                arch: '未知 (需验证)',
+                downloadUrl: url,
+                changelog: result.snippet.isNotEmpty
+                    ? result.snippet
+                    : 'Bing 搜索 APK 直链',
+              ));
         } else {
-          // 解析不到直链 → 保留为下载页源（🔴）
-          pageSources.add(AppDownloadSource(
-            sourceName: '$sourceName (下载页)',
-            sourceDomain: domain,
-            trustLevel: SourceTrustLevel.unknown,
-            version: '官网/网页',
-            size: '—',
-            arch: '—',
-            downloadUrl: url,
-            changelog: result.snippet.isNotEmpty
-                ? '${result.snippet}（网页下载页，需手动点击下载按钮）'
-                : '搜索结果 · 网页下载页（浏览器打开后点按钮下载）',
-          ));
-          _logger.info(
-              '[Download] Page source (no APK found): $sourceName -> $url',
-              tag: 'DL');
+          // 【宽松路径】普通下载页 / HTML 页面
+          // v1.3.6：自动 fetch HTML → 解析 .apk 直链 → 升级为正式 APK 源
+          final reachable = await WebSearchService.checkReachable(url);
+          if (!reachable) {
+            _logger.info('[Download] Page unreachable, skip: $url');
+            return null;
+          }
+          // 尝试从下载页 HTML 中提取 .apk 直链
+          final apkDirectUrl = await _fetchAndParseDownloadPage(url);
+          if (apkDirectUrl != null) {
+            _logger.info(
+                '[Download] Extracted APK from page: $sourceName -> $apkDirectUrl',
+                tag: 'DL');
+            return ('apk', AppDownloadSource(
+                  sourceName: '$sourceName (页面解析)',
+                  sourceDomain: domain,
+                  trustLevel: trustLevel, // 继承原域名信任等级
+                  version: '搜索结果 · 页面解析',
+                  size: '未知',
+                  arch: '未知 (需验证)',
+                  downloadUrl: apkDirectUrl,
+                  referer: url, // 原页面作为 Referer
+                  changelog: result.snippet.isNotEmpty
+                      ? '${result.snippet}（从下载页自动提取直链）'
+                      : '从下载页 HTML 自动提取 APK 直链',
+                ));
+          } else {
+            // 解析不到直链 → 保留为下载页源（🔴）
+            _logger.info(
+                '[Download] Page source (no APK found): $sourceName -> $url',
+                tag: 'DL');
+            return ('page', AppDownloadSource(
+                  sourceName: '$sourceName (下载页)',
+                  sourceDomain: domain,
+                  trustLevel: SourceTrustLevel.unknown,
+                  version: '官网/网页',
+                  size: '—',
+                  arch: '—',
+                  downloadUrl: url,
+                  changelog: result.snippet.isNotEmpty
+                      ? '${result.snippet}（网页下载页，需手动点击下载按钮）'
+                      : '搜索结果 · 网页下载页（浏览器打开后点按钮下载）',
+                ));
+          }
         }
-      }
+        }),
+      );
+      scanned.addAll(batch);
+    }
 
+    for (final r in scanned) {
+      if (r == null) continue;
+      if (r.$1 == 'apk') {
+        apkSources.add(r.$2);
+      } else {
+        pageSources.add(r.$2);
+      }
       // 最多保留 5 个 APK 直链 + 3 个下载页
       if (apkSources.length >= 5 && pageSources.length >= 3) break;
     }
+
 
     // APK 直链排前面，下载页排后面
     return [...apkSources, ...pageSources];
@@ -960,6 +983,9 @@ class AppDownloadService extends ChangeNotifier {
       pageUri = Uri.parse(pageUrl);
     } catch (_) {}
 
+    // 防 ReDoS：HTML 超过 50000 字符时截断，避免正则回溯耗尽 CPU
+    final safeHtml = html.length > 50000 ? html.substring(0, 50000) : html;
+
     // 各种正则模式，按优先级排序
     final patterns = <RegExp>[
       // 1. href="xxx.apk" 或 href='xxx.apk'（最常见）
@@ -986,13 +1012,13 @@ class AppDownloadService extends ChangeNotifier {
       RegExp(
           r'''onclick=["'][^'']*?location\w*\s*[=(]\s*['"]([^'"]*\.apk(?:\?[^'"]*)?)['"]''',
           caseSensitive: false),
-      // 8. 通用 .apk URL（在 JS 变量、JSON 等中）
-      RegExp(r'''["']([^"'<>]*\.apk(?:\?[^"'<>]*)?)["']''',
+      // 8. 通用 .apk URL（在 JS 变量、JSON 等中），限制匹配长度防 ReDoS
+      RegExp(r'''["']([^"'<>]{0,500}\.apk(?:\?[^"'<>]{0,500})?)["']''',
           caseSensitive: false),
     ];
 
     for (final pattern in patterns) {
-      final matches = pattern.allMatches(html);
+      final matches = pattern.allMatches(safeHtml);
       for (final m in matches) {
         final url = m.group(1)!;
         // 跳过太短或明显无效的
@@ -1114,7 +1140,7 @@ class AppDownloadService extends ChangeNotifier {
       }
 
       // 只读前 512KB（下载页 HTML 通常 < 256KB）
-      final maxBytes = 512 * 1024;
+      const maxBytes = 512 * 1024;
       final bytes = <int>[];
       await for (final chunk in response.stream) {
         bytes.addAll(chunk);
@@ -1173,7 +1199,7 @@ class AppDownloadService extends ChangeNotifier {
     // fallback: 取 URL 最后一段 + .apk
     final safeName = appName.replaceAll(RegExp(r'[\\/:*?"<>|\s]'), '_');
     final safeVer = source.version.replaceAll('.', '_');
-    return '${safeName}_v${safeVer}.apk';
+    return '${safeName}_v$safeVer.apk';
   }
 
   // --- 真正启动下载
@@ -1182,6 +1208,9 @@ class AppDownloadService extends ChangeNotifier {
     required AppDownloadSource source,
     void Function(int received, int total)? onProgress,
   }) async {
+    if (currentTask != null && !currentTask!.isComplete) {
+      throw StateError('Another download is already in progress');
+    }
     final saveDir = await getSaveDirectory(appName);
     final fileName = _guessFileName(source, appName);
 
@@ -1198,7 +1227,7 @@ class AppDownloadService extends ChangeNotifier {
     task.fullPath = fullPath;
 
     _logger.info(
-        '[Download] Start ${appName}(${source.version}): ${source.downloadUrl} -> $fullPath');
+        '[Download] Start $appName(${source.version}): ${source.downloadUrl} -> $fullPath');
 
     try {
       await _doDownload(task, source, fullPath, onProgress);
@@ -1367,15 +1396,18 @@ class AppDownloadService extends ChangeNotifier {
 
       // 写文件
       final sink = File(fullPath).openWrite();
-      int written = 0;
-      await for (final bytes in streamed.stream) {
-        written += bytes.length;
-        sink.add(bytes);
-        task.receivedBytes = written;
-        onProgress?.call(written, contentLength);
-        notifyListeners();
+      try {
+        int written = 0;
+        await for (final bytes in streamed.stream.timeout(const Duration(seconds: 60))) {
+          written += bytes.length;
+          sink.add(bytes);
+          task.receivedBytes = written;
+          onProgress?.call(written, contentLength);
+          notifyListeners();
+        }
+      } finally {
+        await sink.close();
       }
-      await sink.close();
 
       // 写了但文件大小不到 256KB 且 .html 内容？→ 不合法
       final finalFile = File(fullPath);
@@ -1384,22 +1416,20 @@ class AppDownloadService extends ChangeNotifier {
           '[Download] File saved: $fullPath (${(finalLen / 1024 / 1024).toStringAsFixed(2)} MB)');
 
       if (finalLen < 512 * 1024) {
-        // < 512KB 几乎一定是错误页面
-        try {
-          final headBytes =
-              await finalFile.openRead(0, 512).expand((b) => b).toList();
-          final head =
-              utf8.decode(headBytes, allowMalformed: true).toLowerCase();
-          if (head.contains('<html') || head.contains('<!doctype')) {
-            throw Exception('下载的文件不是 APK（收到了网页/错误页面）。请换一个下载源试试。');
-          }
-        } catch (e) {
-          rethrow;
+        final headBytes =
+            await finalFile.openRead(0, 512).expand((b) => b).toList();
+        final head =
+            utf8.decode(headBytes, allowMalformed: true).toLowerCase();
+        if (head.contains('<html') || head.contains('<!doctype')) {
+          throw Exception('下载的文件不是 APK（收到了网页/错误页面）。请换一个下载源试试。');
         }
       }
 
       task.receivedBytes = finalLen;
       if (contentLength == 0) task.totalBytes = finalLen;
+    } catch (e) {
+      try { await File(fullPath).delete(); } catch (_) {}
+      rethrow;
     } finally {
       client.close();
     }
@@ -1428,7 +1458,7 @@ class AppDownloadService extends ChangeNotifier {
   }) async {
     // v1.5.0：生成 taskId 并初始化取消标志
     final effectiveTaskId = taskId ??
-        'dl_${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(0xFFFFFF).toRadixString(16)}';
+        'dl_${DateTime.now().millisecondsSinceEpoch}_${Random.secure().nextInt(0xFFFFFF).toRadixString(16)}';
     _cancelFlags[effectiveTaskId] = false;
 
     final client = http.Client();
@@ -1450,11 +1480,6 @@ class AppDownloadService extends ChangeNotifier {
       final contentType = streamed.headers['content-type'] ?? '';
       final finalUrl = streamed.request!.url.toString();
 
-      // v1.4.2 下载安全增强：下载前校验响应类型/大小，防止下到网页/超大文件
-      final lowerCt = contentType.toLowerCase();
-      if (lowerCt.contains('text/html')) {
-        throw Exception('目标不是文件而是网页（HTML），已拒绝下载');
-      }
       const maxBytes = 500 * 1024 * 1024; // 500MB 上限
       if (contentLength > maxBytes) {
         throw Exception(
@@ -1489,12 +1514,26 @@ class AppDownloadService extends ChangeNotifier {
       // 在流式循环内加运行时上限检查（与外层 maxBytes 同值，但作用域不同，重命名避免冲突）。
       const maxBytesRuntime = 500 * 1024 * 1024; // 500MB 上限
       bool oversize = false;
+      bool magicChecked = false;
+      // v1.7.31：跨 chunk 累积前 512 字节用于 HTML 检测（原代码只看第一个 chunk，
+      // 若第一个 chunk 太短（如只有几十字节）就漏检 HTML 页面）
+      final magicBuf = <int>[];
       try {
-        await for (final bytes in streamed.stream) {
-          // v1.5.0：每轮检查取消标志
+        await for (final bytes in streamed.stream.timeout(const Duration(seconds: 120))) {
           if (_cancelFlags[effectiveTaskId] == true) {
             cancelled = true;
             break;
+          }
+          if (!magicChecked) {
+            magicBuf.addAll(bytes);
+            if (magicBuf.length >= 512) {
+              magicChecked = true;
+              if (_isHtmlContent(magicBuf)) {
+                await sink.close();
+                try { await File(fullPath).delete(); } catch (_) {}
+                throw Exception('目标不是文件而是网页，已拒绝下载');
+              }
+            }
           }
           written += bytes.length;
           // v1.6.8：运行时大小检查，覆盖 chunked 编码绕过场景
@@ -1505,6 +1544,15 @@ class AppDownloadService extends ChangeNotifier {
           sink.add(bytes);
           onProgress?.call(written, contentLength);
           notifyListeners();
+        }
+        // v1.7.31：流结束时若仍未检测完（文件 < 512B），用已累积的缓冲做最终检测
+        if (!magicChecked && magicBuf.isNotEmpty) {
+          magicChecked = true;
+          if (_isHtmlContent(magicBuf)) {
+            await sink.close();
+            try { await File(fullPath).delete(); } catch (_) {}
+            throw Exception('目标不是文件而是网页，已拒绝下载');
+          }
         }
       } finally {
         await sink.close();
@@ -1529,10 +1577,18 @@ class AppDownloadService extends ChangeNotifier {
       }
 
       final finalLen = await File(fullPath).length();
+      if (contentLength > 0 && finalLen != contentLength) {
+        try {
+          await File(fullPath).delete();
+        } catch (_) {}
+        throw Exception('下载不完整（期望 $contentLength 字节，实际 $finalLen 字节）');
+      }
       _logger.info(
           '[Download] Generic download complete: $fullPath (${(finalLen / 1024 / 1024).toStringAsFixed(2)} MB)');
 
       return {
+        'success': true,
+        'fullPath': fullPath,
         'path': fullPath,
         'fileName': finalFileName,
         'size': finalLen,
@@ -1547,6 +1603,19 @@ class AppDownloadService extends ChangeNotifier {
       _cancelFlags.remove(effectiveTaskId);
       client.close();
     }
+  }
+
+  static bool _isHtmlContent(List<int> bytes) {
+    if (bytes.isEmpty) return false;
+    final head = String.fromCharCodes(bytes.take(512));
+    final lower = head.toLowerCase();
+    // v1.7.31：改用 contains 替代 startsWith —— BOM/空白/注释等前缀会导致 startsWith 漏检
+    if (lower.contains('<!doctype html') || lower.contains('<html') ||
+        lower.contains('<head') || lower.contains('<body') ||
+        lower.contains('<title>')) {
+      return true;
+    }
+    return false;
   }
 
   /// 从 URL 推断文件名

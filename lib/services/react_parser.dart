@@ -11,6 +11,10 @@ import 'dart:convert';
 ///   - answer    : <answer>...</answer>
 ///   - ask_user  : <ask_user>...</ask_user>
 ///   - mcp_call  : <mcp_call plugin_id="..." tool="...">{...}</mcp_call>
+///   - skill_call: <skill_call name="skill.xxx">{optional JSON}</skill_call>  (v1.7.12 新增)
+///   - plugin_detail: <plugin_detail name="..." />  (v1.7.17 新增，只读加载插件详情)
+///   - mcp_detail  : <mcp_detail plugin_id="..." tool="..." />  (v1.7.17 新增)
+///   - skill_detail: <skill_detail name="..." />  (v1.7.17 新增)
 ///
 /// 纯函数、无副作用，可被聊天页和自检服务复用同一套真实逻辑。
 List<Map<String, String>> parseReActOutput(String s) {
@@ -42,6 +46,10 @@ List<Map<String, String>> parseReActOutput(String s) {
         i = searchMatch.end;
         continue;
       }
+      // v1.7.16 修复：畸形 <search>（命中标签但缺 query）原来会落到逐字符消费，
+      // 把 `<` 写回导致标签被吞成乱码；这里显式跳过整个标签。
+      i = searchMatch.end;
+      continue;
     }
 
     // <download ... /> 自闭合（v1.4.2：新增 url / type / query 属性）
@@ -104,6 +112,77 @@ List<Map<String, String>> parseReActOutput(String s) {
       continue;
     }
 
+    // <plugin_detail name="..." /> 自闭合（v1.7.17：只读加载插件完整协议）
+    final pdMatch = RegExp(
+      r'<plugin_detail\s+([^>]*?)\s*/>',
+      caseSensitive: false,
+    ).matchAsPrefix(s, i);
+    if (pdMatch != null) {
+      final attrs = pdMatch.group(1) ?? '';
+      final nameMatch = RegExp(r'name="([^"]*)"', caseSensitive: false)
+          .firstMatch(attrs);
+      final name = (nameMatch?.group(1) ?? '').trim();
+      if (buf.isNotEmpty) {
+        final t = buf.toString().trim();
+        if (t.isNotEmpty) out.add({'type': 'thinking', 'content': t});
+        buf.clear();
+      }
+      if (name.isNotEmpty) {
+        out.add({'type': 'plugin_detail', 'name': name});
+      }
+      i = pdMatch.end;
+      continue;
+    }
+
+    // <mcp_detail plugin_id="..." tool="..." /> 自闭合（v1.7.17）
+    final mdMatch = RegExp(
+      r'<mcp_detail\s+([^>]*?)\s*/>',
+      caseSensitive: false,
+    ).matchAsPrefix(s, i);
+    if (mdMatch != null) {
+      final attrs = mdMatch.group(1) ?? '';
+      String grab(String k) {
+        final m = RegExp('$k="([^"]*)"', caseSensitive: false)
+            .firstMatch(attrs);
+        return (m?.group(1) ?? '').trim();
+      }
+
+      final pluginId = grab('plugin_id');
+      final tool = grab('tool');
+      if (buf.isNotEmpty) {
+        final t = buf.toString().trim();
+        if (t.isNotEmpty) out.add({'type': 'thinking', 'content': t});
+        buf.clear();
+      }
+      if (pluginId.isNotEmpty && tool.isNotEmpty) {
+        out.add({'type': 'mcp_detail', 'pluginId': pluginId, 'tool': tool});
+      }
+      i = mdMatch.end;
+      continue;
+    }
+
+    // <skill_detail name="..." /> 自闭合（v1.7.17：只读加载 Skill 完整规则）
+    final sdMatch = RegExp(
+      r'<skill_detail\s+([^>]*?)\s*/>',
+      caseSensitive: false,
+    ).matchAsPrefix(s, i);
+    if (sdMatch != null) {
+      final attrs = sdMatch.group(1) ?? '';
+      final nameMatch = RegExp(r'name="([^"]*)"', caseSensitive: false)
+          .firstMatch(attrs);
+      final name = (nameMatch?.group(1) ?? '').trim();
+      if (buf.isNotEmpty) {
+        final t = buf.toString().trim();
+        if (t.isNotEmpty) out.add({'type': 'thinking', 'content': t});
+        buf.clear();
+      }
+      if (name.isNotEmpty) {
+        out.add({'type': 'skill_detail', 'name': name});
+      }
+      i = sdMatch.end;
+      continue;
+    }
+
     // <thinking> / <answer> / <ask_user> / <mcp_call> 配对标签
     final mcpOpen = RegExp(
       r'<mcp_call\s+([^>]*?)>',
@@ -154,29 +233,88 @@ List<Map<String, String>> parseReActOutput(String s) {
       i = mcpOpen.end + close.end;
       continue;
     }
-    final thinkOpen = s.indexOf('<thinking>', i);
-    final answerOpen = s.indexOf('<answer>', i);
-    final askOpen = s.indexOf('<ask_user>', i);
+    // v1.7.12：<skill_call name="skill.xxx">{optional JSON body}</skill_call>
+    // 模仿 mcp_call：配对标签 + 可选 JSON body（body 为空/非法 JSON 也接受，
+    // 因为 Skill 本质是 prompt 注入，不需要严格的入参 schema）
+    final skillOpen = RegExp(
+      r'<skill_call\s+([^>]*?)>',
+      caseSensitive: false,
+    ).matchAsPrefix(s, i);
+    if (skillOpen != null) {
+      String grab(String key) {
+        final match = RegExp('$key="([^"]*)"', caseSensitive: false)
+            .firstMatch(skillOpen.group(1) ?? '');
+        return (match?.group(1) ?? '').trim();
+      }
+
+      final skillName = grab('name');
+      final close = RegExp(r'</skill_call\s*>', caseSensitive: false)
+          .firstMatch(s.substring(skillOpen.end));
+      final bodyEnd = close == null ? s.length : skillOpen.end + close.start;
+      final rawBody = s.substring(skillOpen.end, bodyEnd).trim();
+      dynamic decoded;
+      try {
+        decoded = rawBody.isNotEmpty ? jsonDecode(rawBody) : null;
+      } catch (_) {
+        decoded = null;
+      }
+      if (skillName.isNotEmpty) {
+        if (buf.isNotEmpty) {
+          final t = buf.toString().trim();
+          if (t.isNotEmpty) out.add({'type': 'thinking', 'content': t});
+          buf.clear();
+        }
+        out.add({
+          'type': 'skill_call',
+          'name': skillName,
+          if (decoded is Map)
+            'arguments': jsonEncode(Map<String, dynamic>.from(decoded)),
+          if (decoded is! Map && rawBody.isNotEmpty) 'content': rawBody,
+        });
+      } else {
+        buf.write(s.substring(i, bodyEnd));
+        if (close != null) {
+          i = skillOpen.end + close.end;
+          continue;
+        }
+      }
+      if (close == null) {
+        i = s.length;
+        break;
+      }
+      i = skillOpen.end + close.end;
+      continue;
+    }
+    final thinkMatch = RegExp(r'<(thinking|think)>', caseSensitive: false)
+        .firstMatch(s.substring(i));
+    final answerMatch =
+        RegExp(r'<answer>', caseSensitive: false).firstMatch(s.substring(i));
+    final askMatch =
+        RegExp(r'<ask_user>', caseSensitive: false).firstMatch(s.substring(i));
     int earliest = 1 << 30;
     String earliestTag = '';
-    if (thinkOpen != -1 && thinkOpen < earliest) {
-      earliest = thinkOpen;
+    String openTag = '';
+    if (thinkMatch != null && i + thinkMatch.start < earliest) {
+      earliest = i + thinkMatch.start;
       earliestTag = 'thinking';
+      openTag = thinkMatch.group(0)!;
     }
-    if (answerOpen != -1 && answerOpen < earliest) {
-      earliest = answerOpen;
+    if (answerMatch != null && i + answerMatch.start < earliest) {
+      earliest = i + answerMatch.start;
       earliestTag = 'answer';
+      openTag = answerMatch.group(0)!;
     }
-    if (askOpen != -1 && askOpen < earliest) {
-      earliest = askOpen;
+    if (askMatch != null && i + askMatch.start < earliest) {
+      earliest = i + askMatch.start;
       earliestTag = 'ask_user';
+      openTag = askMatch.group(0)!;
     }
     if (earliestTag.isNotEmpty) {
       final open = earliest;
       final isThink = earliestTag == 'thinking';
       final isAnswer = earliestTag == 'answer';
       final closeTag = isThink
-          ? '</thinking>'
+          ? (openTag.toLowerCase() == '<think>' ? '</think>' : '</thinking>')
           : isAnswer
               ? '</answer>'
               : '</ask_user>';
@@ -186,17 +324,21 @@ List<Map<String, String>> parseReActOutput(String s) {
         if (t.isNotEmpty) out.add({'type': 'thinking', 'content': t});
         buf.clear();
       }
-      final close = s.indexOf(closeTag, open);
-      final tagLen = isThink ? 10 : (isAnswer ? 8 : 10);
-      if (close == -1) {
+      final closeMatch = RegExp(
+        RegExp.escape(closeTag),
+        caseSensitive: false,
+      ).firstMatch(s.substring(open));
+      final tagLen = openTag.length;
+      if (closeMatch == null) {
         final body = s.substring(open + tagLen);
         out.add({'type': earliestTag, 'content': body.trim()});
         i = s.length;
         break;
       }
+      final close = open + closeMatch.start;
       final body = s.substring(open + tagLen, close);
       out.add({'type': earliestTag, 'content': body.trim()});
-      i = close + closeTag.length;
+      i = close + closeMatch.group(0)!.length;
       continue;
     }
     buf.writeCharCode(s.codeUnitAt(i));

@@ -1,7 +1,7 @@
 name: aichat
 description: Nexus - Custom API AI Chat Client
 publish_to: 'none'
-version: 1.7.11+58  # v1.7.11 build 58 VirusTotal云端查毒+MobSF P0修复+M11/M19/M20
+version: 1.7.36+84  # build84：思考强度连续滑杆/输出多功能(代码复制·表格CSV)/搜索来源可点/厂商图标/UI美化
 
 environment:
   sdk: ^3.5.0
@@ -19,6 +19,7 @@ dependencies:
   http: ^1.2.2
   crypto: ^3.0.7
   flutter_markdown: ^0.7.4
+  markdown: ^7.3.1
   provider: ^6.1.2
   uuid: ^4.5.1
   intl: ^0.20.3
@@ -27,8 +28,12 @@ dependencies:
   # v1.3.6：📎 附件功能
   image_picker: ^1.1.2
   file_picker: ^8.1.4
-  archive: ^4.0.4
-  syncfusion_flutter_pdf: ^34.2.4  # PDF 文本抽取（Flutter 18.3+ 无需注册 license key，不弹横幅）
+  archive: ^4.2.0
+  syncfusion_flutter_pdf: ^34.2.5  # PDF 文本抽取（Flutter 18.3+ 无需注册 license key，不弹横幅）
+  google_mlkit_text_recognition: ^0.16.0  # 本机 OCR：非视觉模型把图片文字注入上下文
+  local_auth: ^2.3.0  # 生物识别（指纹/面部解锁）
+  # v1.7.32：首页会话列表左滑删除（替代内置 Dismissible，避免与 Scaffold 抽屉手势在竞技场冲突）
+  flutter_slidable: ^4.0.3
 
 dev_dependencies:
   flutter_test:
@@ -36,4 +41,5 @@ dev_dependencies:
   flutter_lints: ^4.0.0
 
 flutter:
+  generate: true  # v1.7.24 (#11) gen-l10n
   uses-material-design: true

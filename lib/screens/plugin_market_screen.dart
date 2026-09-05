@@ -251,7 +251,7 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
                 onRefresh: () => _loadMcp(refresh: true),
                 child: page == null || page.servers.isEmpty
                     ? ListView(children: [
-                        SizedBox(height: 220),
+                        const SizedBox(height: 220),
                         Center(
                             child: Text(isZh
                                 ? '没有可用的公开 MCP 服务'
@@ -295,7 +295,7 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
                 onRefresh: _loadSkills,
                 child: _skills.isEmpty
                     ? ListView(children: [
-                        SizedBox(height: 220),
+                        const SizedBox(height: 220),
                         Center(
                             child: Text(isZh
                                 ? '没有可用的 Skill'
@@ -675,15 +675,65 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
 
   Future<void> _installSkill(
       SkillMarketItem skill, PluginRegistry registry, bool isZh) async {
+    // v1.7.36：安装过程改为带阶段 + 百分比的进度对话框（替代底部一闪而过的提示）
+    final progress = ValueNotifier<double>(0.05);
+    final stage = ValueNotifier<String>(isZh ? '正在下载 Skill...' : 'Downloading skill...');
+    var dialogOpen = true;
+    // ignore: unawaited_futures
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: Text(isZh ? '安装 Skill' : 'Installing Skill'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (_, v, __) => LinearProgressIndicator(value: v),
+              ),
+              const SizedBox(height: 12),
+              ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (_, v, __) => Text('${(v * 100).round()}%'),
+              ),
+              const SizedBox(height: 4),
+              ValueListenableBuilder<String>(
+                valueListenable: stage,
+                builder: (_, s, __) =>
+                    Text(s, style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ).then((_) => dialogOpen = false);
+    void closeDialog() {
+      if (dialogOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        dialogOpen = false;
+      }
+    }
     try {
-      _showMessage(isZh ? '正在下载 Skill...' : 'Downloading skill...');
-
       // v1.7.9 (M10 修复)：下载前缓存 storage（await 后 context.read 会因页面退出崩溃）
       final storage = context.read<StorageService>();
 
-      // 下载 SKILL.md 内容
-      final content = await SkillRegistryService.downloadSkillContent(skill.downloadUrl);
-      if (!mounted) return;
+      // v1.7.18（需求1）：下载前读 WebSearchConfig，取 githubProxyUrl 传给下载咽喉
+      // （与 APP 下载同源；此处读到后整方法复用，避免 L701 重复读取）
+      final cfg = await storage.getWebSearchConfig();
+      if (!mounted) { closeDialog(); return; }
+
+      // 下载 SKILL.md 内容（v1.7.18：接代理 + 30s + 代理失败回退直连）
+      final content = await SkillRegistryService.downloadSkillContent(
+        skill.downloadUrl,
+        proxyUrl: cfg.githubProxyUrl,
+      );
+      if (!mounted) { closeDialog(); return; }
+      progress.value = 0.4;
+      stage.value = isZh ? '解析 SKILL.md...' : 'Parsing SKILL.md...';
 
       // 解析 SKILL.md
       final parsedSkill = SkillParser.parse(content);
@@ -693,12 +743,15 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
 
       // 检查是否已安装
       if (registry.plugins.any((p) => p.metadata.id == pluginId)) {
+        closeDialog();
         _showMessage(isZh ? '此 Skill 已安装' : 'This skill is already installed', error: true);
         return;
       }
+      progress.value = 0.55;
+      stage.value = isZh ? '本地安全扫描...' : 'Local security scan...';
 
       // v1.7.10：本地规则扫描（零配置默认生效，纯 Dart 离线）
-      final cfg = await storage.getWebSearchConfig();
+      // v1.7.18：cfg 已在下载前读取（含 githubProxyUrl），此处复用，不再重复 getWebSearchConfig
       if (cfg.enableLocalScan) {
         final localResult = await LocalScanService.scanSkill(
           skillContent: content,
@@ -708,6 +761,7 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
         if (!mounted) return;
 
         if (localResult.success && !localResult.safeToInstall) {
+          closeDialog(); // 进度框先关，避免盖住安全确认框
           final confirmedLocal = await _showSecurityScanDialog(
               localResult, skill.name, isZh, isLocal: true);
           if (!confirmedLocal) {
@@ -719,15 +773,17 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
 
       // v1.7.5: SkillSpector 远程深度扫描（可选，配置了端点+开关才跑）
       if (cfg.enableSkillSecurityScan && cfg.skillspectorEndpoint.isNotEmpty) {
-        _showMessage(isZh ? '正在进行安全审查...' : 'Running security scan...');
+        progress.value = 0.7;
+        stage.value = isZh ? '远程安全审查...' : 'Remote security scan...';
         final scanResult = await SecurityScanService.scanSkill(
           skillspectorEndpoint: cfg.skillspectorEndpoint,
           skillContent: content,
           skillName: skill.name,
         );
-        if (!mounted) return;
+        if (!mounted) { closeDialog(); return; }
 
         if (scanResult.success && !scanResult.safeToInstall) {
+          closeDialog();
           final confirmed = await _showSecurityScanDialog(scanResult, skill.name, isZh);
           if (!confirmed) {
             _showMessage(isZh ? '已取消安装' : 'Installation cancelled', error: true);
@@ -736,6 +792,16 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
         }
       }
       
+      // v1.7.12：triggerType 不再硬编码 'answer'（此前所有 Skill 都抢 answer 触发器，
+      // PluginRegistry._fallbacks 是单值 Map，后装的覆盖先装的，导致 dispatch 路由失效）。
+      // 优先级：SKILL.md frontmatter 的 trigger 字段 → 基于 name/description/正文内容关键词猜测
+      final guessedTrigger = _guessSkillTriggerType(
+        parsedSkill.metadata.trigger,
+        parsedSkill.metadata.name,
+        parsedSkill.metadata.description,
+        parsedSkill.instruction,
+      );
+
       // 创建 PluginMetadata
       final metadata = PluginMetadata(
         id: pluginId,
@@ -747,18 +813,35 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
         promptProtocol: parsedSkill.instruction,
         tags: parsedSkill.metadata.tags,
         kind: PluginKind.declarative,
-        triggerType: 'answer', // Skill 默认使用 answer 触发
+        triggerType: guessedTrigger,
         // v1.7.8：保存 SKILL.md 直链，供插件更新检查使用（homepage 可能是市场页面）
-        extra: {'downloadUrl': skill.downloadUrl},
+        // v1.7.12：extra 增加 skillSummary 字段，供 system prompt 的 Skill 清单拼接使用
+        extra: {
+          'downloadUrl': skill.downloadUrl,
+          'skillSummary': _buildSkillSummary(
+            name: parsedSkill.metadata.name,
+            description: parsedSkill.metadata.description,
+            triggerDesc: parsedSkill.metadata.trigger,
+            triggerType: guessedTrigger,
+          ),
+        },
       );
       
       // 安装
+      progress.value = 0.9;
+      stage.value = isZh ? '写入插件注册表…' : 'Registering plugin…';
       await registry.installDeclarative(metadata);
-      
+
+      progress.value = 1.0;
+      stage.value = isZh ? '安装完成' : 'Done';
+      await Future.delayed(const Duration(milliseconds: 300));
+      closeDialog();
+
       if (mounted) {
         _showMessage(isZh ? '安装成功，已启用。' : 'Installed and enabled.');
       }
     } catch (error) {
+      closeDialog();
       _showMessage(isZh ? '安装失败：$error' : 'Installation failed: $error', error: true);
     }
   }
@@ -774,12 +857,12 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
     if (!mounted) return false;
     final colorScheme = Theme.of(context).colorScheme;
     final riskColor = result.riskScore <= 20
-        ? Colors.green
+        ? colorScheme.primary
         : result.riskScore <= 50
-            ? Colors.orange
+            ? colorScheme.tertiary
             : result.riskScore <= 80
-                ? Colors.red
-                : Colors.red.shade900;
+                ? colorScheme.error
+                : colorScheme.error;
     
     final confirmed = await showDialog<bool>(
       context: context,
@@ -788,7 +871,7 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
           children: [
             Icon(
               result.safeToInstall ? Icons.check_circle : Icons.warning_amber_rounded,
-              color: result.safeToInstall ? Colors.green : riskColor,
+              color: result.safeToInstall ? colorScheme.primary : riskColor,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -864,12 +947,12 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
                                 : Icons.info,
                         size: 16,
                         color: finding.severity == SecuritySeverity.critical
-                            ? Colors.red.shade900
+                            ? colorScheme.error
                             : finding.severity == SecuritySeverity.high
-                                ? Colors.red
+                                ? colorScheme.error
                                 : finding.severity == SecuritySeverity.medium
-                                    ? Colors.orange
-                                    : Colors.blue,
+                                    ? colorScheme.tertiary
+                                    : colorScheme.primary,
                       ),
                       const SizedBox(width: 8),
                       Expanded(
@@ -916,13 +999,13 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.red.shade50,
+                    color: colorScheme.errorContainer.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.red.shade200),
+                    border: Border.all(color: colorScheme.errorContainer.withValues(alpha: 0.5)),
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.warning, color: Colors.red.shade700, size: 20),
+                      Icon(Icons.warning, color: colorScheme.error, size: 20),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
@@ -931,7 +1014,7 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
                               : 'This plugin has security risks, install with caution',
                           style: TextStyle(
                             fontSize: 13,
-                            color: Colors.red.shade700,
+                            color: colorScheme.error,
                             fontWeight: FontWeight.w500,
                           ),
                         ),
@@ -950,7 +1033,7 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
             style: FilledButton.styleFrom(
-              backgroundColor: result.safeToInstall ? Colors.green : Colors.orange,
+              backgroundColor: result.safeToInstall ? colorScheme.primary : colorScheme.tertiary,
             ),
             child: Text(isZh ? '继续安装' : 'Continue'),
           ),
@@ -963,8 +1046,103 @@ class _PluginMarketScreenState extends State<PluginMarketScreen> {
 
   void _showMessage(String message, {bool error = false}) {
     if (!mounted) return;
+    final colorScheme = Theme.of(context).colorScheme;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(message),
-        backgroundColor: error ? Colors.redAccent : null));
+        backgroundColor: error ? colorScheme.error : null));
+  }
+
+  /// v1.7.12：根据 Skill 的元数据/正文猜测 triggerType。
+  /// 避免此前硬编码 'answer' 导致所有 Skill 抢同一个触发器、PluginRegistry._fallbacks
+  /// 是单值 Map 发生互相覆盖、dispatch 路由注册不上。
+  static String _guessSkillTriggerType(
+    String? frontmatterTrigger,
+    String name,
+    String description,
+    String instruction,
+  ) {
+    // 1. frontmatter 明确指定了 trigger 词 → 作为关键词 hint 辅助猜测（仍需匹配到已知类型）
+    // 2. 先在 name / description / frontmatterTrigger 里精确匹配
+    final haystack = [
+      frontmatterTrigger ?? '',
+      name,
+      description,
+    ].join(' ').toLowerCase();
+    final haystackDeep = [haystack, instruction.toLowerCase()].join(' ');
+
+    // 按语义类型匹配，越窄的越先判断（如 "download" 比 "answer" 更具体）
+    if (_containsAny(haystackDeep, const [
+      '下载',
+      'download',
+      'apk',
+      '安装包',
+      '安装应用',
+    ])) {
+      return 'download';
+    }
+    if (_containsAny(haystack, const [
+      '搜索',
+      '联网',
+      'search',
+      '查找',
+      '查询信息',
+    ])) {
+      return 'search';
+    }
+    if (_containsAny(haystackDeep, const [
+      '反问',
+      'ask_user',
+      '让用户选择',
+      '用户确认',
+      '确认一下',
+      '需要用户',
+    ])) {
+      return 'ask_user';
+    }
+    if (_containsAny(haystackDeep, const [
+      '自检',
+      'self_check',
+      '卡住',
+      '卡壳',
+      '检查是否',
+    ])) {
+      return 'self_check';
+    }
+    // mcp_call 是 MCP 专用，Skill 不会触发这个类型，跳过
+
+    // 都匹配不上时 → 用 skill.<name> 作为独立 triggerType。
+    // 这样不同 Skill 不会互相抢占；AI 在 <skill_call name="..."> 协议里可以按名调用。
+    final cleaned = name
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    return cleaned.isEmpty ? 'skill.generic' : 'skill.$cleaned';
+  }
+
+  static bool _containsAny(String s, List<String> keywords) {
+    for (final k in keywords) {
+      if (s.contains(k.toLowerCase())) return true;
+    }
+    return false;
+  }
+
+  /// v1.7.12：构造 Skill 的结构化简介，保存在 metadata.extra['skillSummary']，
+  /// 供 buildReactSystemPromptFromPlugins 拼成"Skill 可用清单"注入到 system prompt，
+  /// 让 AI 明确知道当前有哪些 Skill 已安装、分别用来做什么。
+  static String _buildSkillSummary({
+    required String name,
+    required String description,
+    required String? triggerDesc,
+    required String triggerType,
+  }) {
+    final trigger = triggerDesc?.trim().isNotEmpty == true
+        ? triggerDesc!.trim()
+        : '当对话内容涉及"${description.isEmpty ? name : _shortDesc(description)}"时';
+    return '$name | type=$triggerType | 触发时机: $trigger';
+  }
+
+  static String _shortDesc(String description) {
+    final d = description.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return d.length <= 20 ? d : '${d.substring(0, 20)}…';
   }
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
+import 'dart:convert';
 import '../models/api_config.dart';
 import '../models/conversation.dart';
 import '../models/chat_message.dart';
@@ -24,7 +25,7 @@ class StorageService extends ChangeNotifier {
     final path = p.join(dbPath, 'aichat.db');
     _db = await openDatabase(
       path,
-      version: 12,
+      version: 23,
       onCreate: (db, version) async {
         await _createV1Tables(db);
         await _createV2Tables(db);
@@ -73,6 +74,83 @@ class StorageService extends ChangeNotifier {
           await _ensureColumn(db, 'web_search_configs', 'enableVirusTotalScan', 'INTEGER DEFAULT 0');
           await _ensureColumn(db, 'web_search_configs', 'mobsfApiKey', "TEXT DEFAULT ''");
         }
+        if (oldVersion < 13) {
+          await _ensureColumn(db, 'messages', 'modelName', "TEXT DEFAULT ''");
+          await _ensureColumn(db, 'conversations', 'isPinned', 'INTEGER DEFAULT 0');
+        }
+        if (oldVersion < 14) {
+          await _ensureColumn(db, 'api_configs', 'templateId', "TEXT DEFAULT 'custom'");
+        }
+        if (oldVersion < 15) {
+          await _ensureColumn(db, 'messages', 'retryOf', "TEXT DEFAULT ''");
+          await _ensureColumn(db, 'messages', 'retryIndex', 'INTEGER DEFAULT 0');
+        }
+        if (oldVersion < 16) {
+          await _ensureColumn(db, 'messages', 'reasoningSteps', "TEXT DEFAULT '[]'");
+        }
+        if (oldVersion < 17) {
+          _logger.db('DB migrated to v17 (reasoningSteps phase/round support)');
+        }
+        if (oldVersion < 18) {
+          await _ensureColumn(db, 'web_search_configs', 'biometricLockEnabled', 'INTEGER DEFAULT 0');
+    await _ensureColumn(db, 'web_search_configs', 'verboseLogging', 'INTEGER DEFAULT 0');
+          _logger.db('DB migrated to v18 (biometric lock)');
+        }
+        if (oldVersion < 19) {
+          // v1.7.25：思考相关改为每对话独有 → conversations 补 3 列
+          await _ensureColumn(db, 'conversations', 'reactEnabled', 'INTEGER DEFAULT 1');
+          await _ensureColumn(db, 'conversations', 'reasoningEffort', 'INTEGER DEFAULT 0');
+          await _ensureColumn(db, 'conversations', 'reactAutoMode', 'INTEGER DEFAULT 1');
+          await _ensureColumn(db, 'conversations', 'reactMaxRounds', 'INTEGER DEFAULT 30');
+          _logger.db('DB migrated to v19 (per-conversation reasoning effort)');
+        }
+        if (oldVersion < 20) {
+          // v1.7.26 (C2)：messages 补 token 用量 3 列（此前仅内存，重启后丢失）
+          await _ensureColumn(db, 'messages', 'promptTokens', 'INTEGER');
+          await _ensureColumn(db, 'messages', 'completionTokens', 'INTEGER');
+          await _ensureColumn(db, 'messages', 'totalTokens', 'INTEGER');
+          _logger.db('DB migrated to v20 (token usage persistence)');
+        }
+        if (oldVersion < 21) {
+          // v1.7.26 (E3)：重试版本快照持久化——新建 message_versions 表
+          // （此前版本快照仅存进程内存，重启后版本切换功能丢失）
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS message_versions (
+              retryOfId TEXT NOT NULL,
+              versionIndex INTEGER NOT NULL,
+              content TEXT NOT NULL,
+              reasoningSteps TEXT DEFAULT '[]',
+              promptTokens INTEGER,
+              completionTokens INTEGER,
+              totalTokens INTEGER,
+              injectedWebSearchCount INTEGER DEFAULT 0,
+              showStaleFootnote INTEGER DEFAULT 0,
+              modelName TEXT DEFAULT '',
+              savedAt TEXT NOT NULL,
+              PRIMARY KEY (retryOfId, versionIndex)
+            )
+          ''');
+          _logger.db('DB migrated to v21 (retry version snapshot persistence)');
+        }
+        if (oldVersion < 22) {
+          // v1.7.33：api_configs 补 supportVision（视觉支持开关）——此前该字段只在
+          // 模型类里存在，CREATE TABLE 漏列 + onUpgrade 未补，落库时 INSERT 静默失败
+          // （与 v1.3.4 web_search_configs 同型踩坑）
+          await _ensureColumn(db, 'api_configs', 'supportVision', 'INTEGER DEFAULT 1');
+          _logger.db('DB migrated to v22 (per-config vision support toggle)');
+        }
+        if (oldVersion < 23) {
+          // v1.7.34：跨对话记忆 + 深度研究 + 子代理编排
+          //   summary         —— 后台 completeChat 生成的对话摘要（≤500 字）
+          //   memoryEnabled   —— 跨对话记忆总开关（默认开，可在对话设置里关）
+          //   deepResearchMode—— 深度研究模式（打开时强制多专家混合 + 更高轮数 + 关闭 20s 自检）
+          //   subagentMode    —— 子代理路由模式：auto/main_only/force_search/force_synthesis/force_plugin
+          await _ensureColumn(db, 'conversations', 'summary', "TEXT DEFAULT ''");
+          await _ensureColumn(db, 'conversations', 'memoryEnabled', 'INTEGER DEFAULT 1');
+          await _ensureColumn(db, 'conversations', 'deepResearchMode', 'INTEGER DEFAULT 0');
+          await _ensureColumn(db, 'conversations', 'subagentMode', "TEXT DEFAULT 'auto'");
+          _logger.db('DB migrated to v23 (cross-conversation memory + subagent orchestration)');
+        }
       },
     );
     // 启动时 PRAGMA 自检：对 conversations / messages / web_search_configs / api_configs / plugins
@@ -105,8 +183,48 @@ class StorageService extends ChangeNotifier {
     await _ensureColumn(db, 'web_search_configs', 'virusTotalApiKey', "TEXT DEFAULT ''");
     await _ensureColumn(db, 'web_search_configs', 'enableVirusTotalScan', 'INTEGER DEFAULT 0');
     await _ensureColumn(db, 'web_search_configs', 'mobsfApiKey', "TEXT DEFAULT ''");
+    await _ensureColumn(db, 'messages', 'modelName', "TEXT DEFAULT ''");
+    await _ensureColumn(db, 'conversations', 'isPinned', 'INTEGER DEFAULT 0');
+    // v1.7.25：per-conversation 思考字段（reasoningEffort/reactAutoMode/reactMaxRounds）
+    await _ensureColumn(db, 'conversations', 'reactEnabled', 'INTEGER DEFAULT 1');
+    await _ensureColumn(db, 'conversations', 'reasoningEffort', 'INTEGER DEFAULT 0');
+    await _ensureColumn(db, 'conversations', 'reactAutoMode', 'INTEGER DEFAULT 1');
+    await _ensureColumn(db, 'conversations', 'reactMaxRounds', 'INTEGER DEFAULT 30');
+    await _ensureColumn(db, 'api_configs', 'templateId', "TEXT DEFAULT 'custom'");
+    // v1.7.33：api_configs 补 supportVision（视觉支持开关；关闭时图片附件走本机 OCR 降级）
+    await _ensureColumn(db, 'api_configs', 'supportVision', 'INTEGER DEFAULT 1');
+    // v1.7.34：conversations 补跨对话记忆 + 深度研究 + 子代理编排字段（双保险：onUpgrade + 启动自检）
+    await _ensureColumn(db, 'conversations', 'summary', "TEXT DEFAULT ''");
+    await _ensureColumn(db, 'conversations', 'memoryEnabled', 'INTEGER DEFAULT 1');
+    await _ensureColumn(db, 'conversations', 'deepResearchMode', 'INTEGER DEFAULT 0');
+    await _ensureColumn(db, 'conversations', 'subagentMode', "TEXT DEFAULT 'auto'");
+    await _ensureColumn(db, 'messages', 'retryOf', "TEXT DEFAULT ''");
+    await _ensureColumn(db, 'messages', 'retryIndex', 'INTEGER DEFAULT 0');
+    await _ensureColumn(db, 'messages', 'reasoningSteps', "TEXT DEFAULT '[]'");
+    await _ensureColumn(db, 'web_search_configs', 'biometricLockEnabled', 'INTEGER DEFAULT 0');
+    // v1.7.26 (C2)：启动自检补 messages token 用量 3 列（双保险：onCreate schema + onUpgrade 链路）
+    await _ensureColumn(db, 'messages', 'promptTokens', 'INTEGER');
+    await _ensureColumn(db, 'messages', 'completionTokens', 'INTEGER');
+    await _ensureColumn(db, 'messages', 'totalTokens', 'INTEGER');
+    // v1.7.26 (E3)：启动自检补 message_versions 表（幂等，防 onCreate/onUpgrade 漏建）
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS message_versions (
+        retryOfId TEXT NOT NULL,
+        versionIndex INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        reasoningSteps TEXT DEFAULT '[]',
+        promptTokens INTEGER,
+        completionTokens INTEGER,
+        totalTokens INTEGER,
+        injectedWebSearchCount INTEGER DEFAULT 0,
+        showStaleFootnote INTEGER DEFAULT 0,
+        modelName TEXT DEFAULT '',
+        savedAt TEXT NOT NULL,
+        PRIMARY KEY (retryOfId, versionIndex)
+      )
+    ''');
     _initialized = true;
-    _logger.db('DB initialized at $path (v12)');
+    _logger.db('DB initialized at $path (v21)');
   }
 
   /// PRAGMA 自检并补齐缺失列（SQLite 安全 ADD COLUMN）。
@@ -138,6 +256,7 @@ class StorageService extends ChangeNotifier {
         temperature REAL DEFAULT 0.7,
         topP REAL DEFAULT 1.0,
         maxTokens INTEGER DEFAULT 2048,
+        templateId TEXT DEFAULT 'custom',
         cachedModels TEXT DEFAULT ''
       )
     ''');
@@ -153,6 +272,7 @@ class StorageService extends ChangeNotifier {
         enable20sCheck INTEGER DEFAULT 1,
         contextAuto INTEGER DEFAULT 1,
         autoCompress INTEGER DEFAULT 0,
+        isPinned INTEGER DEFAULT 0,
         updatedAt TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         FOREIGN KEY (apiConfigId) REFERENCES api_configs (id)
@@ -166,6 +286,13 @@ class StorageService extends ChangeNotifier {
         content TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         attachments TEXT DEFAULT '[]',
+        modelName TEXT DEFAULT '',
+        retryOf TEXT DEFAULT '',
+        retryIndex INTEGER DEFAULT 0,
+        reasoningSteps TEXT DEFAULT '[]',
+        promptTokens INTEGER,
+        completionTokens INTEGER,
+        totalTokens INTEGER,
         FOREIGN KEY (conversationId) REFERENCES conversations (id) ON DELETE CASCADE
       )
     ''');
@@ -239,7 +366,8 @@ class StorageService extends ChangeNotifier {
         localScanRulesUrl TEXT DEFAULT '',
         virusTotalApiKey TEXT DEFAULT '',
         enableVirusTotalScan INTEGER DEFAULT 0,
-        mobsfApiKey TEXT DEFAULT ''
+        mobsfApiKey TEXT DEFAULT '',
+        biometricLockEnabled INTEGER DEFAULT 0
       )
     ''');
     final existing = await db
@@ -260,6 +388,24 @@ class StorageService extends ChangeNotifier {
         enabled INTEGER NOT NULL DEFAULT 1,
         installedAt INTEGER NOT NULL,
         metadataJson TEXT
+      )
+    ''');
+    // v1.7.26 (E3)：重试版本快照持久化表（onCreate 路径——与 onUpgrade v21、
+    // 启动自检三路同步，遵循"CREATE TABLE 三路同步"铁律）
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS message_versions (
+        retryOfId TEXT NOT NULL,
+        versionIndex INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        reasoningSteps TEXT DEFAULT '[]',
+        promptTokens INTEGER,
+        completionTokens INTEGER,
+        totalTokens INTEGER,
+        injectedWebSearchCount INTEGER DEFAULT 0,
+        showStaleFootnote INTEGER DEFAULT 0,
+        modelName TEXT DEFAULT '',
+        savedAt TEXT NOT NULL,
+        PRIMARY KEY (retryOfId, versionIndex)
       )
     ''');
   }
@@ -485,11 +631,23 @@ class StorageService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> getBiometricLockEnabled() async {
+    final cfg = await getWebSearchConfig();
+    return cfg.biometricLockEnabled;
+  }
+
+  Future<void> setBiometricLockEnabled(bool enabled) async {
+    final cfg = await getWebSearchConfig();
+    cfg.biometricLockEnabled = enabled;
+    await saveWebSearchConfig(cfg);
+    _logger.app('Biometric lock ${enabled ? "enabled" : "disabled"}');
+  }
+
   // --- Conversations ---
   Future<List<Conversation>> getConversations() async {
     final database = await db;
     final maps =
-        await database.query('conversations', orderBy: 'updatedAt DESC');
+        await database.query('conversations', orderBy: 'isPinned DESC, updatedAt DESC');
     return maps.map((m) => Conversation.fromMap(m)).toList();
   }
 
@@ -517,6 +675,46 @@ class StorageService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// v1.7.34：更新对话摘要（跨对话记忆；后台 completeChat 生成后写回，不刷 updatedAt 以免污染排序）
+  Future<void> updateConversationSummary(String id, String summary) async {
+    final database = await db;
+    await database.update('conversations', {'summary': summary},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// v1.7.34：取最近 N 个有摘要的对话（不含当前对话 id）
+  /// 用于消息发送前拼跨对话记忆 system prompt。
+  /// 返回字段：id / title / summary / updatedAt（已按 updatedAt 倒序）
+  Future<List<Map<String, dynamic>>> getRecentSummaries(
+      int limit, {String? excludeId}) async {
+    final database = await db;
+    final whereArgs = excludeId == null
+        ? <Object?>[]
+        : <Object?>[excludeId];
+    final where = excludeId == null ? null : 'id != ? AND summary != \'\'';
+    final maps = await database.query(
+      'conversations',
+      where: where,
+      whereArgs: whereArgs,
+      columns: ['id', 'title', 'summary', 'updatedAt'],
+      orderBy: 'updatedAt DESC',
+      limit: excludeId == null ? limit : limit + 1,
+    );
+    // excludeId == null 时无需过滤空 summary；有 excludeId 时过滤 summary 为空的行
+    return maps
+        .where((m) => ((m['summary'] as String?) ?? '').isNotEmpty)
+        .take(limit)
+        .toList();
+  }
+
+  Future<void> togglePinConversation(String id, bool isPinned) async {
+    final database = await db;
+    await database.update('conversations',
+        {'isPinned': isPinned ? 1 : 0, 'updatedAt': DateTime.now().toIso8601String()},
+        where: 'id = ?', whereArgs: [id]);
+    notifyListeners();
+  }
+
   Future<void> deleteConversation(String id) async {
     final database = await db;
     await database
@@ -537,19 +735,23 @@ class StorageService extends ChangeNotifier {
 
   Future<String> saveMessage(ChatMessage msg) async {
     final database = await db;
-    await database.insert('messages', msg.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace);
-    // Update conversation's lastMessage and updatedAt
-    await database.update(
-        'conversations',
-        {
-          'lastMessage': msg.content.length > 50
-              ? '${msg.content.substring(0, 50)}...'
-              : msg.content,
-          'updatedAt': DateTime.now().toIso8601String(),
-        },
-        where: 'id = ?',
-        whereArgs: [msg.conversationId]);
+    // v1.7.16 修复：INSERT 消息 + UPDATE 会话列表分两步无事务，进程被杀会留下
+    // "消息已存但 lastMessage/updatedAt 未更新"的不一致；用事务包裹保证原子性。
+    await database.transaction((txn) async {
+      await txn.insert('messages', msg.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace);
+      // Update conversation's lastMessage and updatedAt
+      await txn.update(
+          'conversations',
+          {
+            'lastMessage': msg.content.length > 50
+                ? '${msg.content.substring(0, 50)}...'
+                : msg.content,
+            'updatedAt': DateTime.now().toIso8601String(),
+          },
+          where: 'id = ?',
+          whereArgs: [msg.conversationId]);
+    });
     notifyListeners();
     return msg.id;
   }
@@ -566,11 +768,101 @@ class StorageService extends ChangeNotifier {
     notifyListeners();
   }
 
+  // v1.7.26 (E5)：批量删除消息用单事务包裹（撤回级联删除一批消息时保证原子性）
+  Future<void> deleteMessagesByIds(List<String> ids) async {
+    if (ids.isEmpty) return;
+    final database = await db;
+    await database.transaction((txn) async {
+      for (final id in ids) {
+        await txn.delete('messages', where: 'id = ?', whereArgs: [id]);
+      }
+    });
+    notifyListeners();
+  }
+
+  // v1.7.26 (E7)：清空会话消息时同步重置会话摘要与更新时间，
+  // 避免"消息已删但会话列表仍显示旧 lastMessage/updatedAt"的不一致。
   Future<void> deleteMessagesByConversation(String conversationId) async {
     final database = await db;
-    await database.delete('messages',
-        where: 'conversationId = ?', whereArgs: [conversationId]);
+    await database.transaction((txn) async {
+      await txn.delete('messages',
+          where: 'conversationId = ?', whereArgs: [conversationId]);
+      await txn.update(
+          'conversations',
+          {'lastMessage': '', 'updatedAt': DateTime.now().toIso8601String()},
+          where: 'id = ?',
+          whereArgs: [conversationId]);
+    });
     notifyListeners();
+  }
+
+  // ===== v1.7.26 (E3)：重试版本快照持久化（message_versions 表） =====
+
+  /// 保存/覆盖一条重试版本快照（versionIndex 与内存 store 一致，1-based；
+  /// 同 retryOfId+versionIndex 幂等覆盖）
+  Future<void> saveMessageVersion(
+      String retryOfId, int versionIndex, RetryVersion v) async {
+    final database = await db;
+    await database.insert(
+      'message_versions',
+      {
+        'retryOfId': retryOfId,
+        'versionIndex': versionIndex,
+        'content': v.content,
+        'reasoningSteps': json
+            .encode(v.reasoningSteps.map((s) => s.toMap()).toList()),
+        if (v.promptTokens != null) 'promptTokens': v.promptTokens,
+        if (v.completionTokens != null) 'completionTokens': v.completionTokens,
+        if (v.totalTokens != null) 'totalTokens': v.totalTokens,
+        'injectedWebSearchCount': v.injectedWebSearchCount,
+        'showStaleFootnote': v.showStaleFootnote ? 1 : 0,
+        'modelName': v.modelName,
+        'savedAt': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// 加载全部重试版本快照（按 retryOfId 分组、versionIndex 升序，
+  /// 与进程内 _retryVersionStore 结构一致）
+  Future<Map<String, List<RetryVersion>>> loadMessageVersions() async {
+    final database = await db;
+    final maps = await database
+        .query('message_versions', orderBy: 'versionIndex ASC');
+    final result = <String, List<RetryVersion>>{};
+    for (final m in maps) {
+      final retryOfId = m['retryOfId'] as String;
+      final list = result.putIfAbsent(retryOfId, () => []);
+      final reasoning = <ReasoningStep>[];
+      final raw = m['reasoningSteps'] as String?;
+      if (raw != null && raw.isNotEmpty && raw != '[]') {
+        try {
+          final decoded = json.decode(raw) as List;
+          for (final item in decoded) {
+            reasoning
+                .add(ReasoningStep.fromMap(item as Map<String, dynamic>));
+          }
+        } catch (_) {}
+      }
+      list.add(RetryVersion(
+        content: m['content'] as String,
+        reasoningSteps: reasoning,
+        promptTokens: m['promptTokens'] as int?,
+        completionTokens: m['completionTokens'] as int?,
+        totalTokens: m['totalTokens'] as int?,
+        injectedWebSearchCount: (m['injectedWebSearchCount'] as int?) ?? 0,
+        showStaleFootnote: ((m['showStaleFootnote'] as int?) ?? 0) != 0,
+        modelName: (m['modelName'] as String?) ?? '',
+      ));
+    }
+    return result;
+  }
+
+  /// 撤回某条提问时清理其重试版本快照
+  Future<void> deleteMessageVersions(String retryOfId) async {
+    final database = await db;
+    await database
+        .delete('message_versions', where: 'retryOfId = ?', whereArgs: [retryOfId]);
   }
 
   Future<List<Map<String, dynamic>>> loadAllPlugins() async {
@@ -619,9 +911,11 @@ class StorageService extends ChangeNotifier {
     final maps = await database.query('plugins', columns: ['id', 'enabled']);
     final result = <String, bool>{};
     for (final m in maps) {
-      final id = m['id'] as String;
-      final enabled = m['enabled'] as int;
-      result[id] = enabled == 1;
+      // v1.7.16 修复：未来 schema 变动导致列值为 null 时，非空强转会抛 CastError
+      // 使插件启用状态全丢；改为带默认值的宽松读取。
+      final id = m['id'] as String? ?? '';
+      final enabled = (m['enabled'] as int? ?? 1) == 1;
+      if (id.isNotEmpty) result[id] = enabled;
     }
     return result;
   }

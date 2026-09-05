@@ -24,5 +24,6 @@ void main() {
     await tester.pump();
     expect(find.text('超级计算器'), findsOneWidget);
     expect(find.text('AI 实时翻译助手'), findsNothing);
+    await tester.pump(const Duration(milliseconds: 300));
   });
 }

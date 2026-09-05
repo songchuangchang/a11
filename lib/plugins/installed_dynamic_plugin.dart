@@ -82,7 +82,7 @@ class InstalledDynamicPlugin extends ReActPlugin {
         src = PluginSource.installed;
         break;
     }
-    if (meta.kind == PluginKind.mcpRemote) {
+    if (meta.kind.isRemote) {
       return InstalledMcpPlugin.fromMetadata(meta);
     }
     return InstalledDynamicPlugin(metadata: meta, source: src);
@@ -100,8 +100,9 @@ class InstalledDynamicPlugin extends ReActPlugin {
     if (id.contains('search')) return 'search';
     if (id.contains('ask')) return 'ask_user';
     if (id.contains('answer')) return 'answer';
-    if (id.contains('selfcheck') || id.contains('self_check'))
+    if (id.contains('selfcheck') || id.contains('self_check')) {
       return 'self_check';
+    }
     return '__installed_${_meta.id}';
   }
 
@@ -122,10 +123,20 @@ class InstalledDynamicPlugin extends ReActPlugin {
     final preview = fallback.isEmpty
         ? '-'
         : fallback.substring(0, fallback.length > 40 ? 40 : fallback.length);
+    final isExplicitSkill = attrs['type']?.toString() == 'skill_call';
     pc.addReasoningStep(
-      'installed_plugin_${_meta.id}',
-      '[Installed plugin ${_meta.name} v${_meta.version}] '
-          'received trigger type=$triggerType (preview: $preview)',
+      isExplicitSkill ? 'skill_call' : 'installed_plugin_${_meta.id}',
+      isExplicitSkill
+          ? 'Skill ${_meta.name}'
+          : '[Installed plugin ${_meta.name} v${_meta.version}] '
+              'received trigger type=$triggerType (preview: $preview)',
+      pluginId: _meta.id,
+      pluginName: _meta.name,
+      status: isExplicitSkill ? 'success' : 'injected',
+      arguments: attrs['arguments']?.toString() ?? fallback,
+      resultSummary: isExplicitSkill
+          ? 'Skill promptProtocol 已注入，未执行第三方代码'
+          : 'Skill 规则已注入',
     );
   }
 }

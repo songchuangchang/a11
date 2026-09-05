@@ -3,6 +3,7 @@
 /// v1.3.9 支持的搜索后端：
 ///   1) Bing 直爬（默认，无需 Key，国内可访问）
 ///   2) Tavily API（需 Key，结果结构化，质量高）
+library web_search_config;
 ///   3) SearXNG（自建/公共实例，可选）
 ///   4) DuckDuckGo 直爬（无需 Key，国内可访问）
 ///   5) SerpAPI（需 Key，聚合 Google/Bing 等多引擎，100次/月免费）
@@ -42,6 +43,10 @@ extension WebSearchProviderInfo on WebSearchProvider {
     }
   }
 }
+
+/// 远程规则源默认 URL（用户 GitHub 仓库，自动同步）
+const String _defaultRulesUrl =
+    'https://fastly.jsdelivr.net/gh/songchuangchang/a11@main/rules.json';
 
 /// 通用搜索配置（单一配置，简单 KV 存 SQLite 就够了）
 class WebSearchConfig extends ChangeNotifier {
@@ -150,6 +155,9 @@ class WebSearchConfig extends ChangeNotifier {
   /// MobSF API Key（自部署 MobSF 也可配认证，v1.7.11 P0 修复）
   String mobsfApiKey;
 
+  /// v1.7.22：生物识别锁开关（持久化到 web_search_configs）
+  bool biometricLockEnabled;
+
   WebSearchConfig({
     this.webSearchEnabled = true,
     this.provider = WebSearchProvider.bing,
@@ -176,14 +184,16 @@ class WebSearchConfig extends ChangeNotifier {
     this.mobsfEndpoint = '',
     this.enableApkSecurityScan = false,
     this.enableLocalScan = true,
-    this.localScanRulesUrl = '',
+    this.localScanRulesUrl = _defaultRulesUrl,
     this.virusTotalApiKey = '',
     this.enableVirusTotalScan = false,
     this.mobsfApiKey = '',
+    this.biometricLockEnabled = false,
   });
 
   factory WebSearchConfig.fromMap(Map<String, dynamic> m) => WebSearchConfig(
-        webSearchEnabled: (m['webSearchEnabled'] as int? ?? 1) == 1,
+        // v1.7.36：联网搜索内置为默认能力，恒开启（忽略历史存储的 0）
+        webSearchEnabled: true,
         provider: WebSearchProvider.values.firstWhere(
           (e) => e.name == (m['provider'] as String? ?? 'bing'),
           orElse: () => WebSearchProvider.bing,
@@ -211,10 +221,13 @@ class WebSearchConfig extends ChangeNotifier {
         mobsfEndpoint: m['mobsfEndpoint'] as String? ?? '',
         enableApkSecurityScan: (m['enableApkSecurityScan'] as int? ?? 0) == 1,
         enableLocalScan: (m['enableLocalScan'] as int? ?? 1) == 1,
-        localScanRulesUrl: m['localScanRulesUrl'] as String? ?? '',
+        localScanRulesUrl: (m['localScanRulesUrl'] as String?)?.isEmpty == true || (m['localScanRulesUrl'] as String?) == null
+            ? _defaultRulesUrl
+            : m['localScanRulesUrl'] as String,
         virusTotalApiKey: m['virusTotalApiKey'] as String? ?? '',
         enableVirusTotalScan: (m['enableVirusTotalScan'] as int? ?? 0) == 1,
         mobsfApiKey: m['mobsfApiKey'] as String? ?? '',
+        biometricLockEnabled: (m['biometricLockEnabled'] as int? ?? 0) == 1,
       );
 
   Map<String, dynamic> toMap() => {
@@ -248,6 +261,7 @@ class WebSearchConfig extends ChangeNotifier {
         'virusTotalApiKey': virusTotalApiKey,
         'enableVirusTotalScan': enableVirusTotalScan ? 1 : 0,
         'mobsfApiKey': mobsfApiKey,
+        'biometricLockEnabled': biometricLockEnabled ? 1 : 0,
       };
 
   WebSearchConfig copyWith({
@@ -280,6 +294,7 @@ class WebSearchConfig extends ChangeNotifier {
     String? virusTotalApiKey,
     bool? enableVirusTotalScan,
     String? mobsfApiKey,
+    bool? biometricLockEnabled,
   }) {
     return WebSearchConfig(
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
@@ -311,6 +326,7 @@ class WebSearchConfig extends ChangeNotifier {
       virusTotalApiKey: virusTotalApiKey ?? this.virusTotalApiKey,
       enableVirusTotalScan: enableVirusTotalScan ?? this.enableVirusTotalScan,
       mobsfApiKey: mobsfApiKey ?? this.mobsfApiKey,
+      biometricLockEnabled: biometricLockEnabled ?? this.biometricLockEnabled,
     );
   }
 

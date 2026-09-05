@@ -301,6 +301,13 @@ void main() {
       if (payload['method'] == 'initialize') {
         return _rpcResponse(payload, {}, headers: {'mcp-session-id': 's1'});
       }
+      if (payload['method'] == 'tools/list') {
+        return _rpcResponse(payload, {
+          'tools': [
+            {'name': 'any-tool', 'description': 'test', 'inputSchema': {'type': 'object'}}
+          ]
+        });
+      }
       expect(request.headers['mcp-session-id'], 's1');
       return _rpcResponse(payload, {'content': 'ok'});
     });
@@ -310,7 +317,7 @@ void main() {
         await service.toolsCall('https://example.com/mcp', 'any-tool', {});
 
     expect(result, 'ok');
-    expect(methods, ['initialize', 'notifications/initialized', 'tools/call']);
+    expect(methods, ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
   });
 }
 

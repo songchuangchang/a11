@@ -1,3 +1,8 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 
 /// 单个模型版本选项（用户在 API 配置页可以一键切换）
@@ -22,6 +27,27 @@ class ModelOption {
 
   String displayName(bool isZh) => isZh ? nameZh : nameEn;
   String? note(bool isZh) => isZh ? noteZh : noteEn;
+
+  /// v1.7.24 (#7)：JSON 序列化，供模板远程配置（JSON）使用。
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'nameZh': nameZh,
+        'nameEn': nameEn,
+        'recommended': recommended,
+        'isFreeModel': isFreeModel,
+        'noteZh': noteZh,
+        'noteEn': noteEn,
+      };
+
+  factory ModelOption.fromJson(Map<String, dynamic> j) => ModelOption(
+        id: (j['id'] ?? '').toString(),
+        nameZh: (j['nameZh'] ?? j['name'] ?? '').toString(),
+        nameEn: (j['nameEn'] ?? j['name'] ?? '').toString(),
+        recommended: j['recommended'] == true,
+        isFreeModel: j['isFreeModel'] == true,
+        noteZh: j['noteZh']?.toString(),
+        noteEn: j['noteEn']?.toString(),
+      );
 }
 
 /// 预置的 OpenAI 兼容 API Provider 模板
@@ -118,6 +144,122 @@ class ApiProviderTemplate {
   String get recommendedModelId => models.isNotEmpty
       ? models.firstWhere((m) => m.recommended, orElse: () => models.first).id
       : defaultModel;
+
+  // ================================================================
+  // v1.7.24 (#7)：JSON 序列化 + 颜色/图标字符串映射（供远程模板配置）
+  // ================================================================
+
+  static const Map<String, Color> _colorByName = {
+    'purple': Colors.purple,
+    'orange': Colors.orange,
+    'teal': Colors.teal,
+    'lightBlue': Colors.lightBlue,
+    'cyan': Colors.cyan,
+    'indigo': Colors.indigo,
+    'red': Colors.red,
+    'blueGrey': Colors.blueGrey,
+    'amber': Colors.amber,
+    'green': Colors.green,
+    'blueAccent': Colors.blueAccent,
+    'deepOrange': Colors.deepOrange,
+    'brown': Colors.brown,
+    'pinkAccent': Colors.pinkAccent,
+    'black87': Colors.black87,
+    'blue': Colors.blue,
+  };
+
+  static const Map<String, IconData> _iconByName = {
+    'all_inclusive': Icons.all_inclusive,
+    'cloud': Icons.cloud,
+    'smart_toy': Icons.smart_toy,
+    'dark_mode': Icons.dark_mode,
+    'lan': Icons.lan,
+    'animation': Icons.animation,
+    'volcano': Icons.volcano,
+    'public': Icons.public,
+    'brightness_auto': Icons.brightness_auto,
+    'local_fire_department': Icons.local_fire_department,
+    'hub': Icons.hub,
+    'generating_tokens': Icons.generating_tokens,
+    'auto_awesome': Icons.auto_awesome,
+    'bolt': Icons.bolt,
+    'wb_sunny': Icons.wb_sunny,
+    'account_tree': Icons.account_tree,
+    'computer': Icons.computer,
+    'desktop_mac': Icons.desktop_mac,
+  };
+
+  /// 解析颜色：支持 'purple' 等名称，或 '0xFF20B2AA' 十六进制。
+  static Color colorFromName(String? name) {
+    if (name == null || name.isEmpty) return Colors.blue;
+    final named = _colorByName[name];
+    if (named != null) return named;
+    final v = int.tryParse(name.replaceFirst('0x', ''), radix: 16);
+    if (v != null) return Color(v);
+    return Colors.blue;
+  }
+
+  static String colorToName(Color c) {
+    for (final e in _colorByName.entries) {
+      if (e.value == c) return e.key;
+    }
+    return '0x${c.toARGB32().toRadixString(16).toUpperCase()}';
+  }
+
+  static IconData iconFromName(String? name) =>
+      _iconByName[name] ?? Icons.cloud;
+
+  static String iconToName(IconData i) {
+    for (final e in _iconByName.entries) {
+      if (e.value == i) return e.key;
+    }
+    return 'cloud';
+  }
+
+  /// v1.7.24 (#7)：导出为 JSON（供资产/远程配置复用）。
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'nameZh': nameZh,
+        'nameEn': nameEn,
+        'defaultConfigName': defaultConfigName,
+        'baseUrl': baseUrl,
+        'defaultModel': defaultModel,
+        'group': group.name,
+        'hasFreeTier': hasFreeTier,
+        'freeDetailZh': freeDetailZh,
+        'freeDetailEn': freeDetailEn,
+        'descZh': descZh,
+        'descEn': descEn,
+        'color': colorToName(color),
+        'icon': iconToName(icon),
+        'models': models.map((m) => m.toJson()).toList(),
+      };
+
+  /// v1.7.24 (#7)：从 JSON 解析模板。
+  factory ApiProviderTemplate.fromJson(Map<String, dynamic> j) {
+    final modelsRaw = (j['models'] as List?) ?? const [];
+    return ApiProviderTemplate(
+      id: (j['id'] ?? '').toString(),
+      nameZh: (j['nameZh'] ?? j['name'] ?? '').toString(),
+      nameEn: (j['nameEn'] ?? j['name'] ?? '').toString(),
+      defaultConfigName: (j['defaultConfigName'] ?? j['name'] ?? '').toString(),
+      baseUrl: (j['baseUrl'] ?? '').toString(),
+      defaultModel: (j['defaultModel'] ?? '').toString(),
+      group: ApiProviderGroup.values.firstWhere((g) => g.name == j['group'],
+          orElse: () => ApiProviderGroup.international),
+      hasFreeTier: j['hasFreeTier'] == true,
+      freeDetailZh: (j['freeDetailZh'] ?? '').toString(),
+      freeDetailEn: (j['freeDetailEn'] ?? '').toString(),
+      descZh: (j['descZh'] ?? '').toString(),
+      descEn: (j['descEn'] ?? '').toString(),
+      color: colorFromName(j['color']?.toString()),
+      icon: iconFromName(j['icon']?.toString()),
+      models: modelsRaw
+          .whereType<Map>()
+          .map((m) => ModelOption.fromJson(Map<String, dynamic>.from(m)))
+          .toList(),
+    );
+  }
 }
 
 enum ApiProviderGroup {
@@ -150,16 +292,38 @@ const _all = <ApiProviderTemplate>[
     group: ApiProviderGroup.domestic,
     hasFreeTier: false,
     freeDetailZh: '仅新账号赠 500 万 Tokens（30天有效），过期/用完后 API 全付费',
-    freeDetailEn: 'New-account 5M tokens (30 days only); API paid after credit expires',
+    freeDetailEn:
+        'New-account 5M tokens (30 days only); API paid after credit expires',
     descZh: '2026 最新 V4 系列，V4-Flash 性价比极高，API 按量付费',
     descEn: 'Latest V4 lineup 2026; V4-Flash best cost/performance',
     color: Colors.purple,
     icon: Icons.all_inclusive,
     models: [
-      ModelOption(id: 'deepseek-v4-flash', nameZh: 'V4-Flash · 性价比', nameEn: 'V4-Flash · Value', recommended: true, noteZh: '主力 1M 上下文，2026 主推', noteEn: '1M ctx, 2026 flagship value'),
-      ModelOption(id: 'deepseek-v4-pro', nameZh: 'V4-Pro · 旗舰', nameEn: 'V4-Pro · Flagship', noteZh: '1M 上下文，更强推理', noteEn: '1M ctx, strongest reasoning'),
-      ModelOption(id: 'deepseek-chat', nameZh: 'V3 · 兼容旧版', nameEn: 'V3 · Legacy', noteZh: '2026-07-24 已废弃', noteEn: 'Deprecated 2026-07-24'),
-      ModelOption(id: 'deepseek-reasoner', nameZh: 'R1 · 推理旧版', nameEn: 'R1 · Legacy Reasoner', noteZh: '已迁移到 V4 思考模式', noteEn: 'Migrate to V4 thinking mode'),
+      ModelOption(
+          id: 'deepseek-v4-flash',
+          nameZh: 'V4-Flash · 性价比',
+          nameEn: 'V4-Flash · Value',
+          recommended: true,
+          noteZh: '主力 1M 上下文，2026 主推',
+          noteEn: '1M ctx, 2026 flagship value'),
+      ModelOption(
+          id: 'deepseek-v4-pro',
+          nameZh: 'V4-Pro · 旗舰',
+          nameEn: 'V4-Pro · Flagship',
+          noteZh: '1M 上下文，更强推理',
+          noteEn: '1M ctx, strongest reasoning'),
+      ModelOption(
+          id: 'deepseek-chat',
+          nameZh: 'V3 · 兼容旧版',
+          nameEn: 'V3 · Legacy',
+          noteZh: '2026-07-24 已废弃',
+          noteEn: 'Deprecated 2026-07-24'),
+      ModelOption(
+          id: 'deepseek-reasoner',
+          nameZh: 'R1 · 推理旧版',
+          nameEn: 'R1 · Legacy Reasoner',
+          noteZh: '已迁移到 V4 思考模式',
+          noteEn: 'Migrate to V4 thinking mode'),
     ],
   ),
 
@@ -174,18 +338,50 @@ const _all = <ApiProviderTemplate>[
     group: ApiProviderGroup.domestic,
     hasFreeTier: false,
     freeDetailZh: '仅新用户一次性赠 Tokens + 月度赠送额度，额度用完全付费',
-    freeDetailEn: 'One-time welcome + monthly free quota; API paid after quota runs out',
+    freeDetailEn:
+        'One-time welcome + monthly free quota; API paid after quota runs out',
     descZh: '国内首选，模型最全；Qwen3.7/3.8 长上下文 1M',
     descEn: 'Broadest model lineup in China; 1M context on 3.7/3.8',
     color: Colors.orange,
     icon: Icons.cloud,
     models: [
-      ModelOption(id: 'qwen3.7-plus', nameZh: 'Qwen3.7-Plus · 均衡', nameEn: 'Qwen3.7-Plus · Balanced', recommended: true, noteZh: '1M 上下文，日常主力', noteEn: '1M ctx, daily workhorse'),
-      ModelOption(id: 'qwen3.7-flash', nameZh: 'Qwen3.7-Flash · 极速', nameEn: 'Qwen3.7-Flash · Fast', noteZh: '便宜大量调用', noteEn: 'Cheap for bulk calls'),
-      ModelOption(id: 'qwen3.8-max', nameZh: 'Qwen3.8-Max · 旗舰', nameEn: 'Qwen3.8-Max · Flagship', noteZh: '2026 最新旗舰，1M 上下文', noteEn: '2026 newest flagship, 1M ctx'),
-      ModelOption(id: 'qwen3.7-max', nameZh: 'Qwen3.7-Max · 上一代旗舰', nameEn: 'Qwen3.7-Max · Prev Flagship', noteZh: '长期折扣中', noteEn: 'Running promo discount'),
-      ModelOption(id: 'qwen-long', nameZh: 'Qwen-Long · 长文', nameEn: 'Qwen-Long', noteZh: '超长上下文', noteEn: 'Ultra-long context'),
-      ModelOption(id: 'qwen-vl-max', nameZh: 'Qwen-VL-Max · 多模态', nameEn: 'Qwen-VL-Max · Vision', noteZh: '图片理解', noteEn: 'Image understanding'),
+      ModelOption(
+          id: 'qwen3.7-plus',
+          nameZh: 'Qwen3.7-Plus · 均衡',
+          nameEn: 'Qwen3.7-Plus · Balanced',
+          recommended: true,
+          noteZh: '1M 上下文，日常主力',
+          noteEn: '1M ctx, daily workhorse'),
+      ModelOption(
+          id: 'qwen3.7-flash',
+          nameZh: 'Qwen3.7-Flash · 极速',
+          nameEn: 'Qwen3.7-Flash · Fast',
+          noteZh: '便宜大量调用',
+          noteEn: 'Cheap for bulk calls'),
+      ModelOption(
+          id: 'qwen3.8-max',
+          nameZh: 'Qwen3.8-Max · 旗舰',
+          nameEn: 'Qwen3.8-Max · Flagship',
+          noteZh: '2026 最新旗舰，1M 上下文',
+          noteEn: '2026 newest flagship, 1M ctx'),
+      ModelOption(
+          id: 'qwen3.7-max',
+          nameZh: 'Qwen3.7-Max · 上一代旗舰',
+          nameEn: 'Qwen3.7-Max · Prev Flagship',
+          noteZh: '长期折扣中',
+          noteEn: 'Running promo discount'),
+      ModelOption(
+          id: 'qwen-long',
+          nameZh: 'Qwen-Long · 长文',
+          nameEn: 'Qwen-Long',
+          noteZh: '超长上下文',
+          noteEn: 'Ultra-long context'),
+      ModelOption(
+          id: 'qwen-vl-max',
+          nameZh: 'Qwen-VL-Max · 多模态',
+          nameEn: 'Qwen-VL-Max · Vision',
+          noteZh: '图片理解',
+          noteEn: 'Image understanding'),
     ],
   ),
 
@@ -206,12 +402,45 @@ const _all = <ApiProviderTemplate>[
     color: Colors.teal,
     icon: Icons.smart_toy,
     models: [
-      ModelOption(id: 'glm-4.7-flash', nameZh: 'GLM-4.7-Flash · 永久免费', nameEn: 'GLM-4.7-Flash · Free Forever', isFreeModel: true, recommended: true, noteZh: '200K 上下文，免费', noteEn: '200K ctx, free'),
-      ModelOption(id: 'glm-4-flash', nameZh: 'GLM-4-Flash · 永久免费', nameEn: 'GLM-4-Flash · Free Forever', isFreeModel: true, noteZh: '128K 上下文，免费', noteEn: '128K ctx, free'),
-      ModelOption(id: 'glm-4.5-air', nameZh: 'GLM-4.5-Air · 高性价比', nameEn: 'GLM-4.5-Air · Value', noteZh: '¥0.8/¥2 每百万', noteEn: '¥0.8/¥2 per M'),
-      ModelOption(id: 'glm-4.7', nameZh: 'GLM-4.7 · 主力', nameEn: 'GLM-4.7 · Mainstream', noteZh: '高智能主力档', noteEn: 'Balanced intelligence'),
-      ModelOption(id: 'glm-5.2', nameZh: 'GLM-5.2 · 旗舰', nameEn: 'GLM-5.2 · Flagship', noteZh: '1M 上下文，Coding SOTA', noteEn: '1M ctx, coding SOTA'),
-      ModelOption(id: 'glm-5.3', nameZh: 'GLM-5.3 · 最新旗舰', nameEn: 'GLM-5.3 · Newest Flagship', noteZh: '2026-08 最新发布', noteEn: 'Released Aug 2026'),
+      ModelOption(
+          id: 'glm-4.7-flash',
+          nameZh: 'GLM-4.7-Flash · 永久免费',
+          nameEn: 'GLM-4.7-Flash · Free Forever',
+          isFreeModel: true,
+          recommended: true,
+          noteZh: '200K 上下文，免费',
+          noteEn: '200K ctx, free'),
+      ModelOption(
+          id: 'glm-4-flash',
+          nameZh: 'GLM-4-Flash · 永久免费',
+          nameEn: 'GLM-4-Flash · Free Forever',
+          isFreeModel: true,
+          noteZh: '128K 上下文，免费',
+          noteEn: '128K ctx, free'),
+      ModelOption(
+          id: 'glm-4.5-air',
+          nameZh: 'GLM-4.5-Air · 高性价比',
+          nameEn: 'GLM-4.5-Air · Value',
+          noteZh: '¥0.8/¥2 每百万',
+          noteEn: '¥0.8/¥2 per M'),
+      ModelOption(
+          id: 'glm-4.7',
+          nameZh: 'GLM-4.7 · 主力',
+          nameEn: 'GLM-4.7 · Mainstream',
+          noteZh: '高智能主力档',
+          noteEn: 'Balanced intelligence'),
+      ModelOption(
+          id: 'glm-5.2',
+          nameZh: 'GLM-5.2 · 旗舰',
+          nameEn: 'GLM-5.2 · Flagship',
+          noteZh: '1M 上下文，Coding SOTA',
+          noteEn: '1M ctx, coding SOTA'),
+      ModelOption(
+          id: 'glm-5.3',
+          nameZh: 'GLM-5.3 · 最新旗舰',
+          nameEn: 'GLM-5.3 · Newest Flagship',
+          noteZh: '2026-08 最新发布',
+          noteEn: 'Released Aug 2026'),
     ],
   ),
 
@@ -226,16 +455,38 @@ const _all = <ApiProviderTemplate>[
     group: ApiProviderGroup.domestic,
     hasFreeTier: false,
     freeDetailZh: '仅新用户赠 15 元代金券（总量有限用完即止），API 按用量付费',
-    freeDetailEn: 'New-account ~¥15 credit (finite, used up then paid); API pay-per-use',
+    freeDetailEn:
+        'New-account ~¥15 credit (finite, used up then paid); API pay-per-use',
     descZh: '256K/1M 超长上下文；编程 Agent 强',
     descEn: '256K/1M long context; strong coding agent',
     color: Colors.lightBlue,
     icon: Icons.dark_mode,
     models: [
-      ModelOption(id: 'kimi-k2.5', nameZh: 'Kimi-K2.5 · 主力', nameEn: 'Kimi-K2.5 · Main', recommended: true, noteZh: '256K 上下文，多模态', noteEn: '256K ctx, multimodal'),
-      ModelOption(id: 'kimi-k2.6', nameZh: 'Kimi-K2.6 · 高性能', nameEn: 'Kimi-K2.6 · Performance', noteZh: '延迟更低，393 tps', noteEn: 'Low latency, 393 tps'),
-      ModelOption(id: 'kimi-k2.7-code', nameZh: 'Kimi-K2.7-Code · 编码', nameEn: 'Kimi-K2.7-Code', noteZh: '编程专项模型', noteEn: 'Coding specialized'),
-      ModelOption(id: 'kimi-k3', nameZh: 'Kimi-K3 · 旗舰', nameEn: 'Kimi-K3 · Flagship', noteZh: '2026-07 发布，1M 上下文', noteEn: 'Released Jul 2026, 1M ctx'),
+      ModelOption(
+          id: 'kimi-k2.5',
+          nameZh: 'Kimi-K2.5 · 主力',
+          nameEn: 'Kimi-K2.5 · Main',
+          recommended: true,
+          noteZh: '256K 上下文，多模态',
+          noteEn: '256K ctx, multimodal'),
+      ModelOption(
+          id: 'kimi-k2.6',
+          nameZh: 'Kimi-K2.6 · 高性能',
+          nameEn: 'Kimi-K2.6 · Performance',
+          noteZh: '延迟更低，393 tps',
+          noteEn: 'Low latency, 393 tps'),
+      ModelOption(
+          id: 'kimi-k2.7-code',
+          nameZh: 'Kimi-K2.7-Code · 编码',
+          nameEn: 'Kimi-K2.7-Code',
+          noteZh: '编程专项模型',
+          noteEn: 'Coding specialized'),
+      ModelOption(
+          id: 'kimi-k3',
+          nameZh: 'Kimi-K3 · 旗舰',
+          nameEn: 'Kimi-K3 · Flagship',
+          noteZh: '2026-07 发布，1M 上下文',
+          noteEn: 'Released Jul 2026, 1M ctx'),
     ],
   ),
 
@@ -256,11 +507,33 @@ const _all = <ApiProviderTemplate>[
     color: Colors.cyan,
     icon: Icons.lan,
     models: [
-      ModelOption(id: 'deepseek-ai/DeepSeek-V4-Flash', nameZh: 'DeepSeek V4-Flash', nameEn: 'DeepSeek V4-Flash', recommended: true, noteZh: '最新 V4', noteEn: 'Latest V4'),
-      ModelOption(id: 'Qwen/Qwen2.5-7B-Instruct', nameZh: 'Qwen2.5-7B · 永久免费', nameEn: 'Qwen2.5-7B · Free Forever', isFreeModel: true, noteZh: '≤9B 免费', noteEn: '≤9B, free'),
-      ModelOption(id: 'Qwen/Qwen2.5-72B-Instruct', nameZh: 'Qwen2.5-72B', nameEn: 'Qwen2.5-72B'),
-      ModelOption(id: 'THUDM/glm-4.7-flash', nameZh: 'GLM-4.7-Flash · 免费', nameEn: 'GLM-4.7-Flash · Free', isFreeModel: true),
-      ModelOption(id: 'meta-llama/Llama-3.3-70B-Instruct', nameZh: 'Llama-3.3-70B', nameEn: 'Llama-3.3-70B'),
+      ModelOption(
+          id: 'deepseek-ai/DeepSeek-V4-Flash',
+          nameZh: 'DeepSeek V4-Flash',
+          nameEn: 'DeepSeek V4-Flash',
+          recommended: true,
+          noteZh: '最新 V4',
+          noteEn: 'Latest V4'),
+      ModelOption(
+          id: 'Qwen/Qwen2.5-7B-Instruct',
+          nameZh: 'Qwen2.5-7B · 永久免费',
+          nameEn: 'Qwen2.5-7B · Free Forever',
+          isFreeModel: true,
+          noteZh: '≤9B 免费',
+          noteEn: '≤9B, free'),
+      ModelOption(
+          id: 'Qwen/Qwen2.5-72B-Instruct',
+          nameZh: 'Qwen2.5-72B',
+          nameEn: 'Qwen2.5-72B'),
+      ModelOption(
+          id: 'THUDM/glm-4.7-flash',
+          nameZh: 'GLM-4.7-Flash · 免费',
+          nameEn: 'GLM-4.7-Flash · Free',
+          isFreeModel: true),
+      ModelOption(
+          id: 'meta-llama/Llama-3.3-70B-Instruct',
+          nameZh: 'Llama-3.3-70B',
+          nameEn: 'Llama-3.3-70B'),
     ],
   ),
 
@@ -281,9 +554,23 @@ const _all = <ApiProviderTemplate>[
     color: Colors.indigo,
     icon: Icons.animation,
     models: [
-      ModelOption(id: 'MiniMax-M3', nameZh: 'MiniMax-M3 · 最新旗舰', nameEn: 'MiniMax-M3 · Newest', recommended: true, noteZh: '2026 最新', noteEn: '2026 latest'),
-      ModelOption(id: 'MiniMax-M2.5', nameZh: 'MiniMax-M2.5', nameEn: 'MiniMax-M2.5', noteZh: '全球周调用量第一', noteEn: 'Global #1 weekly tokens'),
-      ModelOption(id: 'MiniMax-Text-01', nameZh: 'MiniMax-Text-01', nameEn: 'MiniMax-Text-01'),
+      ModelOption(
+          id: 'MiniMax-M3',
+          nameZh: 'MiniMax-M3 · 最新旗舰',
+          nameEn: 'MiniMax-M3 · Newest',
+          recommended: true,
+          noteZh: '2026 最新',
+          noteEn: '2026 latest'),
+      ModelOption(
+          id: 'MiniMax-M2.5',
+          nameZh: 'MiniMax-M2.5',
+          nameEn: 'MiniMax-M2.5',
+          noteZh: '全球周调用量第一',
+          noteEn: 'Global #1 weekly tokens'),
+      ModelOption(
+          id: 'MiniMax-Text-01',
+          nameZh: 'MiniMax-Text-01',
+          nameEn: 'MiniMax-Text-01'),
     ],
   ),
 
@@ -298,16 +585,34 @@ const _all = <ApiProviderTemplate>[
     group: ApiProviderGroup.domestic,
     hasFreeTier: false,
     freeDetailZh: '仅有"安心体验"一次性额度 + 协作活动奖励，用完即止，API 非永久免费',
-    freeDetailEn: 'Safe-mode one-time quota + activity rewards only; non-permanent free API',
+    freeDetailEn:
+        'Safe-mode one-time quota + activity rewards only; non-permanent free API',
     descZh: 'Seed-2.0 Pro 中文综合体验最佳；支持所有主流模型',
     descEn: 'Best Chinese chat experience; supports all major models',
     color: Colors.red,
     icon: Icons.volcano,
     models: [
-      ModelOption(id: 'doubao-seed-2-pro-32k', nameZh: 'Seed 2.0 Pro · 32K', nameEn: 'Seed 2.0 Pro · 32K', recommended: true, noteZh: '中文综合第一', noteEn: 'Best Chinese overall'),
-      ModelOption(id: 'doubao-seed-2-lite-32k', nameZh: 'Seed 2.0 Lite', nameEn: 'Seed 2.0 Lite', noteZh: '轻量便宜', noteEn: 'Light & cheap'),
-      ModelOption(id: 'doubao-1-5-pro-32k', nameZh: '豆包 1.5 Pro · 32K', nameEn: 'Doubao 1.5 Pro · 32K'),
-      ModelOption(id: 'doubao-1-5-lite-32k', nameZh: '豆包 1.5 Lite', nameEn: 'Doubao 1.5 Lite'),
+      ModelOption(
+          id: 'doubao-seed-2-pro-32k',
+          nameZh: 'Seed 2.0 Pro · 32K',
+          nameEn: 'Seed 2.0 Pro · 32K',
+          recommended: true,
+          noteZh: '中文综合第一',
+          noteEn: 'Best Chinese overall'),
+      ModelOption(
+          id: 'doubao-seed-2-lite-32k',
+          nameZh: 'Seed 2.0 Lite',
+          nameEn: 'Seed 2.0 Lite',
+          noteZh: '轻量便宜',
+          noteEn: 'Light & cheap'),
+      ModelOption(
+          id: 'doubao-1-5-pro-32k',
+          nameZh: '豆包 1.5 Pro · 32K',
+          nameEn: 'Doubao 1.5 Pro · 32K'),
+      ModelOption(
+          id: 'doubao-1-5-lite-32k',
+          nameZh: '豆包 1.5 Lite',
+          nameEn: 'Doubao 1.5 Lite'),
     ],
   ),
 
@@ -328,10 +633,33 @@ const _all = <ApiProviderTemplate>[
     color: Colors.blueGrey,
     icon: Icons.public,
     models: [
-      ModelOption(id: 'ernie_speed_8k', nameZh: 'ERNIE-Speed-8K · 永久免费', nameEn: 'ERNIE-Speed-8K · Free Forever', isFreeModel: true, recommended: true, noteZh: '永久免费，QPS 50', noteEn: 'Free forever, QPS 50'),
-      ModelOption(id: 'ernie-3.5-8k', nameZh: 'ERNIE-3.5-8K · 永久免费', nameEn: 'ERNIE-3.5-8K · Free Forever', isFreeModel: true, noteZh: '永久免费', noteEn: 'Free forever'),
-      ModelOption(id: 'ernie-4.5-turbo-vl-preview', nameZh: 'ERNIE-4.5 · 旗舰', nameEn: 'ERNIE-4.5 · Flagship', noteZh: '多模态', noteEn: 'Multimodal'),
-      ModelOption(id: 'ernie-tiny-8k', nameZh: 'ERNIE-Tiny · 极速', nameEn: 'ERNIE-Tiny · Fastest', noteZh: '最快最轻', noteEn: 'Fastest, lightest'),
+      ModelOption(
+          id: 'ernie_speed_8k',
+          nameZh: 'ERNIE-Speed-8K · 永久免费',
+          nameEn: 'ERNIE-Speed-8K · Free Forever',
+          isFreeModel: true,
+          recommended: true,
+          noteZh: '永久免费，QPS 50',
+          noteEn: 'Free forever, QPS 50'),
+      ModelOption(
+          id: 'ernie-3.5-8k',
+          nameZh: 'ERNIE-3.5-8K · 永久免费',
+          nameEn: 'ERNIE-3.5-8K · Free Forever',
+          isFreeModel: true,
+          noteZh: '永久免费',
+          noteEn: 'Free forever'),
+      ModelOption(
+          id: 'ernie-4.5-turbo-vl-preview',
+          nameZh: 'ERNIE-4.5 · 旗舰',
+          nameEn: 'ERNIE-4.5 · Flagship',
+          noteZh: '多模态',
+          noteEn: 'Multimodal'),
+      ModelOption(
+          id: 'ernie-tiny-8k',
+          nameZh: 'ERNIE-Tiny · 极速',
+          nameEn: 'ERNIE-Tiny · Fastest',
+          noteZh: '最快最轻',
+          noteEn: 'Fastest, lightest'),
     ],
   ),
 
@@ -346,16 +674,28 @@ const _all = <ApiProviderTemplate>[
     group: ApiProviderGroup.domestic,
     hasFreeTier: false,
     freeDetailZh: '仅新用户一次性 100 万 Token 资源包，用完即止，API 全付费',
-    freeDetailEn: 'New-user one-time 1M token package only; API fully paid afterward',
+    freeDetailEn:
+        'New-user one-time 1M token package only; API fully paid afterward',
     descZh: '腾讯官方；微信/腾讯生态集成',
     descEn: 'Tencent official; WeChat/Tencent ecosystem',
-    color: const Color(0xFF20B2AA),
+    color: Color(0xFF20B2AA),
     icon: Icons.brightness_auto,
     models: [
-      ModelOption(id: 'hunyuan-standard', nameZh: '混元-Standard · 均衡', nameEn: 'Hunyuan-Standard', recommended: true),
-      ModelOption(id: 'hunyuan-large', nameZh: '混元-Large · 旗舰', nameEn: 'Hunyuan-Large · Flagship'),
-      ModelOption(id: 'hunyuan-lite', nameZh: '混元-Lite · 轻量', nameEn: 'Hunyuan-Lite · Light'),
-      ModelOption(id: 'hunyuan-code', nameZh: '混元-Code · 编码', nameEn: 'Hunyuan-Code'),
+      ModelOption(
+          id: 'hunyuan-standard',
+          nameZh: '混元-Standard · 均衡',
+          nameEn: 'Hunyuan-Standard',
+          recommended: true),
+      ModelOption(
+          id: 'hunyuan-large',
+          nameZh: '混元-Large · 旗舰',
+          nameEn: 'Hunyuan-Large · Flagship'),
+      ModelOption(
+          id: 'hunyuan-lite',
+          nameZh: '混元-Lite · 轻量',
+          nameEn: 'Hunyuan-Lite · Light'),
+      ModelOption(
+          id: 'hunyuan-code', nameZh: '混元-Code · 编码', nameEn: 'Hunyuan-Code'),
     ],
   ),
 
@@ -373,13 +713,29 @@ const _all = <ApiProviderTemplate>[
     freeDetailEn: 'Spark-Lite free forever (unlimited tokens, QPS 2)',
     descZh: '中文理解强；Spark-Lite 永久免费',
     descEn: 'Strong Chinese understanding; Spark-Lite free forever',
-    color: const Color(0xFF1E90FF),
+    color: Color(0xFF1E90FF),
     icon: Icons.local_fire_department,
     models: [
-      ModelOption(id: 'spark-lite', nameZh: 'Spark-Lite · 永久免费', nameEn: 'Spark-Lite · Free Forever', isFreeModel: true, recommended: true, noteZh: '永久免费，QPS 2', noteEn: 'Free forever, QPS 2'),
-      ModelOption(id: 'spark-pro', nameZh: 'Spark-Pro · 主力', nameEn: 'Spark-Pro · Main'),
-      ModelOption(id: 'spark-max', nameZh: 'Spark-Max · 旗舰', nameEn: 'Spark-Max · Flagship'),
-      ModelOption(id: 'spark-ultra', nameZh: 'Spark-Ultra · 最强', nameEn: 'Spark-Ultra · Strongest'),
+      ModelOption(
+          id: 'spark-lite',
+          nameZh: 'Spark-Lite · 永久免费',
+          nameEn: 'Spark-Lite · Free Forever',
+          isFreeModel: true,
+          recommended: true,
+          noteZh: '永久免费，QPS 2',
+          noteEn: 'Free forever, QPS 2'),
+      ModelOption(
+          id: 'spark-pro',
+          nameZh: 'Spark-Pro · 主力',
+          nameEn: 'Spark-Pro · Main'),
+      ModelOption(
+          id: 'spark-max',
+          nameZh: 'Spark-Max · 旗舰',
+          nameEn: 'Spark-Max · Flagship'),
+      ModelOption(
+          id: 'spark-ultra',
+          nameZh: 'Spark-Ultra · 最强',
+          nameEn: 'Spark-Ultra · Strongest'),
     ],
   ),
 
@@ -398,17 +754,36 @@ const _all = <ApiProviderTemplate>[
     group: ApiProviderGroup.international,
     hasFreeTier: false,
     freeDetailZh: '仅部分模型偶有免费促销；平台本身无稳定永久免费层',
-    freeDetailEn: 'Occasional free-tier model promos only; no stable permanent free tier on platform',
+    freeDetailEn:
+        'Occasional free-tier model promos only; no stable permanent free tier on platform',
     descZh: '一把 Key 访问全球所有主流大模型',
     descEn: 'One API key for 400+ models worldwide',
     color: Colors.amber,
     icon: Icons.hub,
     models: [
-      ModelOption(id: 'openrouter/auto', nameZh: 'Auto · 自动路由', nameEn: 'Auto · Auto Route', recommended: true, noteZh: '自动选最便宜', noteEn: 'Auto cheapest'),
-      ModelOption(id: 'deepseek/deepseek-v4-flash', nameZh: 'DeepSeek V4-Flash', nameEn: 'DeepSeek V4-Flash'),
-      ModelOption(id: 'anthropic/claude-sonnet-4.6', nameZh: 'Claude Sonnet 4.6', nameEn: 'Claude Sonnet 4.6'),
-      ModelOption(id: 'google/gemini-3-flash', nameZh: 'Gemini 3 Flash', nameEn: 'Gemini 3 Flash'),
-      ModelOption(id: 'openai/gpt-5.4-mini', nameZh: 'GPT-5.4 Mini', nameEn: 'GPT-5.4 Mini'),
+      ModelOption(
+          id: 'openrouter/auto',
+          nameZh: 'Auto · 自动路由',
+          nameEn: 'Auto · Auto Route',
+          recommended: true,
+          noteZh: '自动选最便宜',
+          noteEn: 'Auto cheapest'),
+      ModelOption(
+          id: 'deepseek/deepseek-v4-flash',
+          nameZh: 'DeepSeek V4-Flash',
+          nameEn: 'DeepSeek V4-Flash'),
+      ModelOption(
+          id: 'anthropic/claude-sonnet-4.6',
+          nameZh: 'Claude Sonnet 4.6',
+          nameEn: 'Claude Sonnet 4.6'),
+      ModelOption(
+          id: 'google/gemini-3-flash',
+          nameZh: 'Gemini 3 Flash',
+          nameEn: 'Gemini 3 Flash'),
+      ModelOption(
+          id: 'openai/gpt-5.4-mini',
+          nameZh: 'GPT-5.4 Mini',
+          nameEn: 'GPT-5.4 Mini'),
     ],
   ),
 
@@ -429,10 +804,31 @@ const _all = <ApiProviderTemplate>[
     color: Colors.green,
     icon: Icons.generating_tokens,
     models: [
-      ModelOption(id: 'gpt-5.4-mini', nameZh: 'GPT-5.4 Mini · 轻量', nameEn: 'GPT-5.4 Mini · Light', recommended: true, noteZh: '便宜快', noteEn: 'Cheap & fast'),
-      ModelOption(id: 'gpt-5.4', nameZh: 'GPT-5.4 · 旗舰', nameEn: 'GPT-5.4 · Flagship', noteZh: '多模态', noteEn: 'Multimodal'),
-      ModelOption(id: 'gpt-5.5', nameZh: 'GPT-5.5 · 最新旗舰', nameEn: 'GPT-5.5 · Newest Flagship', noteZh: '2026 最新', noteEn: '2026 newest'),
-      ModelOption(id: 'o3-mini', nameZh: 'o3-mini · 推理', nameEn: 'o3-mini · Reasoner', noteZh: '链式思考', noteEn: 'Chain-of-thought'),
+      ModelOption(
+          id: 'gpt-5.4-mini',
+          nameZh: 'GPT-5.4 Mini · 轻量',
+          nameEn: 'GPT-5.4 Mini · Light',
+          recommended: true,
+          noteZh: '便宜快',
+          noteEn: 'Cheap & fast'),
+      ModelOption(
+          id: 'gpt-5.4',
+          nameZh: 'GPT-5.4 · 旗舰',
+          nameEn: 'GPT-5.4 · Flagship',
+          noteZh: '多模态',
+          noteEn: 'Multimodal'),
+      ModelOption(
+          id: 'gpt-5.5',
+          nameZh: 'GPT-5.5 · 最新旗舰',
+          nameEn: 'GPT-5.5 · Newest Flagship',
+          noteZh: '2026 最新',
+          noteEn: '2026 newest'),
+      ModelOption(
+          id: 'o3-mini',
+          nameZh: 'o3-mini · 推理',
+          nameEn: 'o3-mini · Reasoner',
+          noteZh: '链式思考',
+          noteEn: 'Chain-of-thought'),
     ],
   ),
 
@@ -453,10 +849,29 @@ const _all = <ApiProviderTemplate>[
     color: Colors.blueAccent,
     icon: Icons.auto_awesome,
     models: [
-      ModelOption(id: 'gemini-3-flash', nameZh: 'Gemini 3 Flash · 免费层', nameEn: 'Gemini 3 Flash · Free Tier', isFreeModel: true, recommended: true, noteZh: '免费层可用', noteEn: 'Free tier'),
-      ModelOption(id: 'gemini-3.5-flash', nameZh: 'Gemini 3.5 Flash', nameEn: 'Gemini 3.5 Flash'),
-      ModelOption(id: 'gemini-3.1-pro', nameZh: 'Gemini 3.1 Pro · 旗舰', nameEn: 'Gemini 3.1 Pro · Flagship', noteZh: '16项基准赢13项', noteEn: 'Won 13/16 benchmarks'),
-      ModelOption(id: 'gemini-2.5-flash', nameZh: 'Gemini 2.5 Flash · 免费', nameEn: 'Gemini 2.5 Flash · Free', isFreeModel: true),
+      ModelOption(
+          id: 'gemini-3-flash',
+          nameZh: 'Gemini 3 Flash · 免费层',
+          nameEn: 'Gemini 3 Flash · Free Tier',
+          isFreeModel: true,
+          recommended: true,
+          noteZh: '免费层可用',
+          noteEn: 'Free tier'),
+      ModelOption(
+          id: 'gemini-3.5-flash',
+          nameZh: 'Gemini 3.5 Flash',
+          nameEn: 'Gemini 3.5 Flash'),
+      ModelOption(
+          id: 'gemini-3.1-pro',
+          nameZh: 'Gemini 3.1 Pro · 旗舰',
+          nameEn: 'Gemini 3.1 Pro · Flagship',
+          noteZh: '16项基准赢13项',
+          noteEn: 'Won 13/16 benchmarks'),
+      ModelOption(
+          id: 'gemini-2.5-flash',
+          nameZh: 'Gemini 2.5 Flash · 免费',
+          nameEn: 'Gemini 2.5 Flash · Free',
+          isFreeModel: true),
     ],
   ),
 
@@ -477,9 +892,19 @@ const _all = <ApiProviderTemplate>[
     color: Colors.deepOrange,
     icon: Icons.bolt,
     models: [
-      ModelOption(id: 'llama-3.3-70b-versatile', nameZh: 'Llama-3.3-70B', nameEn: 'Llama-3.3-70B', recommended: true),
-      ModelOption(id: 'llama-3.1-8b-instant', nameZh: 'Llama-3.1-8B · 极速', nameEn: 'Llama-3.1-8B · Instant', noteZh: '最快', noteEn: 'Fastest'),
-      ModelOption(id: 'qwen/qwen3-32b', nameZh: 'Qwen3-32B', nameEn: 'Qwen3-32B'),
+      ModelOption(
+          id: 'llama-3.3-70b-versatile',
+          nameZh: 'Llama-3.3-70B',
+          nameEn: 'Llama-3.3-70B',
+          recommended: true),
+      ModelOption(
+          id: 'llama-3.1-8b-instant',
+          nameZh: 'Llama-3.1-8B · 极速',
+          nameEn: 'Llama-3.1-8B · Instant',
+          noteZh: '最快',
+          noteEn: 'Fastest'),
+      ModelOption(
+          id: 'qwen/qwen3-32b', nameZh: 'Qwen3-32B', nameEn: 'Qwen3-32B'),
     ],
   ),
 
@@ -500,10 +925,31 @@ const _all = <ApiProviderTemplate>[
     color: Colors.brown,
     icon: Icons.wb_sunny,
     models: [
-      ModelOption(id: 'claude-sonnet-4.6', nameZh: 'Claude Sonnet 4.6 · 均衡', nameEn: 'Claude Sonnet 4.6 · Balanced', recommended: true, noteZh: '性价比', noteEn: 'Good value'),
-      ModelOption(id: 'claude-haiku-4.5', nameZh: 'Claude Haiku 4.5 · 极速', nameEn: 'Claude Haiku 4.5 · Fast', noteZh: '最快最便宜', noteEn: 'Fastest & cheapest'),
-      ModelOption(id: 'claude-opus-4.6', nameZh: 'Claude Opus 4.6 · 旗舰', nameEn: 'Claude Opus 4.6 · Flagship', noteZh: '综合体验第一', noteEn: 'Best overall LMArena #1'),
-      ModelOption(id: 'claude-opus-5', nameZh: 'Claude Opus 5 · 最新旗舰', nameEn: 'Claude Opus 5 · Newest', noteZh: '2026 最新', noteEn: '2026 newest'),
+      ModelOption(
+          id: 'claude-sonnet-4.6',
+          nameZh: 'Claude Sonnet 4.6 · 均衡',
+          nameEn: 'Claude Sonnet 4.6 · Balanced',
+          recommended: true,
+          noteZh: '性价比',
+          noteEn: 'Good value'),
+      ModelOption(
+          id: 'claude-haiku-4.5',
+          nameZh: 'Claude Haiku 4.5 · 极速',
+          nameEn: 'Claude Haiku 4.5 · Fast',
+          noteZh: '最快最便宜',
+          noteEn: 'Fastest & cheapest'),
+      ModelOption(
+          id: 'claude-opus-4.6',
+          nameZh: 'Claude Opus 4.6 · 旗舰',
+          nameEn: 'Claude Opus 4.6 · Flagship',
+          noteZh: '综合体验第一',
+          noteEn: 'Best overall LMArena #1'),
+      ModelOption(
+          id: 'claude-opus-5',
+          nameZh: 'Claude Opus 5 · 最新旗舰',
+          nameEn: 'Claude Opus 5 · Newest',
+          noteZh: '2026 最新',
+          noteEn: '2026 newest'),
     ],
   ),
 
@@ -524,9 +970,23 @@ const _all = <ApiProviderTemplate>[
     color: Colors.pinkAccent,
     icon: Icons.account_tree,
     models: [
-      ModelOption(id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', nameZh: 'Llama-3.3-70B Turbo', nameEn: 'Llama-3.3-70B Turbo', recommended: true),
-      ModelOption(id: 'deepseek-ai/DeepSeek-V4-Pro', nameZh: 'DeepSeek V4-Pro', nameEn: 'DeepSeek V4-Pro', noteZh: '1.6T MoE', noteEn: '1.6T MoE'),
-      ModelOption(id: 'meta-llama/Llama-4-Ultra', nameZh: 'Llama-4-Ultra', nameEn: 'Llama-4-Ultra', noteZh: 'Meta 最新旗舰', noteEn: 'Meta newest flagship'),
+      ModelOption(
+          id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+          nameZh: 'Llama-3.3-70B Turbo',
+          nameEn: 'Llama-3.3-70B Turbo',
+          recommended: true),
+      ModelOption(
+          id: 'deepseek-ai/DeepSeek-V4-Pro',
+          nameZh: 'DeepSeek V4-Pro',
+          nameEn: 'DeepSeek V4-Pro',
+          noteZh: '1.6T MoE',
+          noteEn: '1.6T MoE'),
+      ModelOption(
+          id: 'meta-llama/Llama-4-Ultra',
+          nameZh: 'Llama-4-Ultra',
+          nameEn: 'Llama-4-Ultra',
+          noteZh: 'Meta 最新旗舰',
+          noteEn: 'Meta newest flagship'),
     ],
   ),
 
@@ -549,22 +1009,77 @@ const _all = <ApiProviderTemplate>[
     hasFreeTier: true,
     freeDetailZh: '完全免费，本地运行，无需 API Key',
     freeDetailEn: '100% free, runs locally, no API Key',
-    descZh: '模型实际跑在电脑上，手机只是客户端。⚠️ 手机端必须填电脑局域网 IP（如 http://192.168.1.100:11434/v1），不能用 localhost（localhost 在手机上指手机本身，连不到电脑的 Ollama）',
-    descEn: 'Models actually run on your PC; phone is just the client. ⚠️ On phone you MUST use PC LAN IP (e.g. http://192.168.1.100:11434/v1), NOT localhost (localhost on phone means the phone itself, cannot reach PC Ollama)',
+    descZh:
+        '模型实际跑在电脑上，手机只是客户端。⚠️ 手机端必须填电脑局域网 IP（如 http://192.168.1.100:11434/v1），不能用 localhost（localhost 在手机上指手机本身，连不到电脑的 Ollama）',
+    descEn:
+        'Models actually run on your PC; phone is just the client. ⚠️ On phone you MUST use PC LAN IP (e.g. http://192.168.1.100:11434/v1), NOT localhost (localhost on phone means the phone itself, cannot reach PC Ollama)',
     color: Colors.black87,
     icon: Icons.computer,
     models: [
       // —— 电脑轻量（低配电脑也能跑）——
-      ModelOption(id: 'qwen2.5:0.5b-instruct-q4_0', nameZh: 'Qwen2.5-0.5B · 电脑轻量', nameEn: 'Qwen2.5-0.5B · PC Light', isFreeModel: true, noteZh: '~400MB，电脑低配流畅', noteEn: '~400MB, smooth on low-end PC'),
-      ModelOption(id: 'qwen2.5:1.5b-instruct-q4_0', nameZh: 'Qwen2.5-1.5B · 电脑主力', nameEn: 'Qwen2.5-1.5B · PC Main', isFreeModel: true, recommended: true, noteZh: '~1GB，电脑对话主力', noteEn: '~1GB, main for PC chat'),
-      ModelOption(id: 'minicpm3-v2_5:2b-instruct-q4_K_M', nameZh: 'MiniCPM3-2B · 中文强', nameEn: 'MiniCPM3-2B · Good Chinese', isFreeModel: true, noteZh: '中文能力强，~1.4GB', noteEn: 'Strong Chinese, ~1.4GB'),
-      ModelOption(id: 'llama3.2:1b-instruct-q4_0', nameZh: 'Llama3.2-1B', nameEn: 'Llama3.2-1B', isFreeModel: true, noteZh: '~730MB', noteEn: '~730MB'),
-      ModelOption(id: 'qwen2.5:3b-instruct-q4_K_M', nameZh: 'Qwen2.5-3B · 电脑进阶', nameEn: 'Qwen2.5-3B · PC Advanced', isFreeModel: true, noteZh: '~2GB，电脑进阶首选', noteEn: '~2GB, PC advanced pick'),
-      ModelOption(id: 'llama3.2:3b-instruct-q4_0', nameZh: 'Llama3.2-3B', nameEn: 'Llama3.2-3B', isFreeModel: true, noteZh: '~1.8GB，电脑进阶', noteEn: '~1.8GB, PC advanced'),
+      ModelOption(
+          id: 'qwen2.5:0.5b-instruct-q4_0',
+          nameZh: 'Qwen2.5-0.5B · 电脑轻量',
+          nameEn: 'Qwen2.5-0.5B · PC Light',
+          isFreeModel: true,
+          noteZh: '~400MB，电脑低配流畅',
+          noteEn: '~400MB, smooth on low-end PC'),
+      ModelOption(
+          id: 'qwen2.5:1.5b-instruct-q4_0',
+          nameZh: 'Qwen2.5-1.5B · 电脑主力',
+          nameEn: 'Qwen2.5-1.5B · PC Main',
+          isFreeModel: true,
+          recommended: true,
+          noteZh: '~1GB，电脑对话主力',
+          noteEn: '~1GB, main for PC chat'),
+      ModelOption(
+          id: 'minicpm3-v2_5:2b-instruct-q4_K_M',
+          nameZh: 'MiniCPM3-2B · 中文强',
+          nameEn: 'MiniCPM3-2B · Good Chinese',
+          isFreeModel: true,
+          noteZh: '中文能力强，~1.4GB',
+          noteEn: 'Strong Chinese, ~1.4GB'),
+      ModelOption(
+          id: 'llama3.2:1b-instruct-q4_0',
+          nameZh: 'Llama3.2-1B',
+          nameEn: 'Llama3.2-1B',
+          isFreeModel: true,
+          noteZh: '~730MB',
+          noteEn: '~730MB'),
+      ModelOption(
+          id: 'qwen2.5:3b-instruct-q4_K_M',
+          nameZh: 'Qwen2.5-3B · 电脑进阶',
+          nameEn: 'Qwen2.5-3B · PC Advanced',
+          isFreeModel: true,
+          noteZh: '~2GB，电脑进阶首选',
+          noteEn: '~2GB, PC advanced pick'),
+      ModelOption(
+          id: 'llama3.2:3b-instruct-q4_0',
+          nameZh: 'Llama3.2-3B',
+          nameEn: 'Llama3.2-3B',
+          isFreeModel: true,
+          noteZh: '~1.8GB，电脑进阶',
+          noteEn: '~1.8GB, PC advanced'),
       // —— 桌面级（需较好电脑配置，8GB+ VRAM / 大内存）——
-      ModelOption(id: 'qwen2.5:7b-instruct-q4_K_M', nameZh: 'Qwen2.5-7B · 桌面级', nameEn: 'Qwen2.5-7B · Desktop', isFreeModel: true, noteZh: '桌面 / 高配电脑', noteEn: 'Desktop / high-end PC'),
-      ModelOption(id: 'gemma3:4b-instruct-q4_K_M', nameZh: 'Gemma3-4B', nameEn: 'Gemma3-4B', isFreeModel: true),
-      ModelOption(id: 'phi3:mini-4k-instruct', nameZh: 'Phi-3-Mini', nameEn: 'Phi-3-Mini', isFreeModel: true, noteZh: '~2.3GB', noteEn: '~2.3GB'),
+      ModelOption(
+          id: 'qwen2.5:7b-instruct-q4_K_M',
+          nameZh: 'Qwen2.5-7B · 桌面级',
+          nameEn: 'Qwen2.5-7B · Desktop',
+          isFreeModel: true,
+          noteZh: '桌面 / 高配电脑',
+          noteEn: 'Desktop / high-end PC'),
+      ModelOption(
+          id: 'gemma3:4b-instruct-q4_K_M',
+          nameZh: 'Gemma3-4B',
+          nameEn: 'Gemma3-4B',
+          isFreeModel: true),
+      ModelOption(
+          id: 'phi3:mini-4k-instruct',
+          nameZh: 'Phi-3-Mini',
+          nameEn: 'Phi-3-Mini',
+          isFreeModel: true,
+          noteZh: '~2.3GB',
+          noteEn: '~2.3GB'),
     ],
   ),
 
@@ -581,13 +1096,201 @@ const _all = <ApiProviderTemplate>[
     hasFreeTier: true,
     freeDetailZh: '完全免费，桌面端使用，无需 API Key',
     freeDetailEn: '100% free for desktop; no API Key',
-    descZh: '电脑端本地模型 GUI；推荐 GGUF 量化模型。⚠️ 手机端必须填电脑局域网 IP（如 http://192.168.1.100:1234/v1），不能用 localhost',
-    descEn: 'Desktop local model GUI; GGUF quantized recommended. ⚠️ On phone use PC LAN IP (e.g. http://192.168.1.100:1234/v1), NOT localhost',
+    descZh:
+        '电脑端本地模型 GUI；推荐 GGUF 量化模型。⚠️ 手机端必须填电脑局域网 IP（如 http://192.168.1.100:1234/v1），不能用 localhost',
+    descEn:
+        'Desktop local model GUI; GGUF quantized recommended. ⚠️ On phone use PC LAN IP (e.g. http://192.168.1.100:1234/v1), NOT localhost',
     color: Colors.brown,
     icon: Icons.desktop_mac,
     models: [
-      ModelOption(id: 'bartowski/Qwen2.5-14B-Instruct-GGUF/qwen2.5-14b-instruct.Q4_K_M.gguf', nameZh: 'Qwen2.5-14B · 桌面推荐', nameEn: 'Qwen2.5-14B · Desktop Rec', recommended: true, isFreeModel: true),
-      ModelOption(id: 'lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf', nameZh: 'Llama3.1-8B', nameEn: 'Llama3.1-8B', isFreeModel: true),
+      ModelOption(
+          id: 'bartowski/Qwen2.5-14B-Instruct-GGUF/qwen2.5-14b-instruct.Q4_K_M.gguf',
+          nameZh: 'Qwen2.5-14B · 桌面推荐',
+          nameEn: 'Qwen2.5-14B · Desktop Rec',
+          recommended: true,
+          isFreeModel: true),
+      ModelOption(
+          id: 'lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+          nameZh: 'Llama3.1-8B',
+          nameEn: 'Llama3.1-8B',
+          isFreeModel: true),
     ],
   ),
 ];
+
+/// v1.7.24 (#7)：API 模板目录 —— 内置默认 + 远程 JSON 更新。
+///
+/// 远程 JSON 格式（二选一）：
+///   A. `{"templates": [ {ApiProviderTemplate.toJson()}, ... ]}`
+///   B. 直接是一个模板数组 `[ {...}, ... ]`
+///
+/// 远程模板按 id 覆盖内置模板；全新 id 自动追加。
+/// 这样「加新服务商」只需更新远程 JSON，无需发版。
+class ApiProviderTemplateCatalog {
+  ApiProviderTemplateCatalog._();
+
+  static final ApiProviderTemplateCatalog instance =
+      ApiProviderTemplateCatalog._();
+
+  /// 远程模板（按 id 索引），初始为空。
+  Map<String, ApiProviderTemplate> _remote = {};
+
+  /// 最近一次拉取/应用结果信息（供 UI 展示）。
+  String lastMessage = '';
+
+  DateTime? lastUpdatedAt;
+
+  bool get hasRemote => _remote.isNotEmpty;
+
+  static const _urlKey = 'remote_api_templates_url';
+  static const _jsonKey = 'remote_api_templates_json';
+  static const _updatedKey = 'remote_api_templates_updated_at';
+  static const _retryKey = 'remote_api_templates_retry_pending';
+  static const _refreshInterval = Duration(days: 7);
+
+  Future<void> initialize({String? url}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString(_jsonKey);
+    if (cached != null && applyJson(cached)) {
+      lastUpdatedAt = DateTime.tryParse(prefs.getString(_updatedKey) ?? '');
+    }
+    final source = prefs.getString(_urlKey) ?? url;
+    if (source == null || source.isEmpty) return;
+    final updated = DateTime.tryParse(prefs.getString(_updatedKey) ?? '');
+    final due = updated == null ||
+        DateTime.now().difference(updated) >= _refreshInterval;
+    final retry = prefs.getBool(_retryKey) ?? false;
+    if (due || retry) await _refreshAndCache(source, prefs);
+  }
+
+  Future<bool> _refreshAndCache(String url, SharedPreferences prefs) async {
+    final ok = await fetchRemote(url);
+    if (ok) {
+      await prefs.setString(_urlKey, url);
+      final payload = {
+        'templates': _remote.values.map((t) => t.toJson()).toList()
+      };
+      await prefs.setString(_jsonKey, json.encode(payload));
+      await prefs.setString(_updatedKey, DateTime.now().toIso8601String());
+      await prefs.setBool(_retryKey, false);
+    } else {
+      await prefs.setBool(_retryKey, true);
+    }
+    return ok;
+  }
+
+  Future<bool> refreshOnline(String url) async {
+    final prefs = await SharedPreferences.getInstance();
+    return _refreshAndCache(url.trim(), prefs);
+  }
+
+  /// 生效模板列表：内置 + 远程（远程覆盖同 id、追加新 id）。
+  List<ApiProviderTemplate> get all {
+    final merged = <String, ApiProviderTemplate>{};
+    for (final t in ApiProviderTemplate.all) {
+      merged[t.id] = t;
+    }
+    merged.addAll(_remote);
+    return merged.values.toList();
+  }
+
+  /// 按分组取模板（含远程）。
+  List<ApiProviderTemplate> byGroup(ApiProviderGroup g) =>
+      all.where((e) => e.group == g).toList();
+
+  /// 从远程 URL 拉取 JSON 模板并合并。
+  Future<bool> fetchRemote(String url) async {
+    if (url.trim().isEmpty) {
+      lastMessage = '远程模板 URL 为空';
+      return false;
+    }
+    final trimmed = url.trim();
+    // v1.7.30: raw.githubusercontent.com 在部分地区被墙，失败后自动尝试 jsdelivr 镜像
+    if (await _doFetch(trimmed)) return true;
+    final mirror = _jsdelivrMirror(trimmed);
+    if (mirror != null && mirror != trimmed) {
+      if (await _doFetch(mirror)) return true;
+    }
+    return false;
+  }
+
+  Future<bool> _doFetch(String url) async {
+    try {
+      final resp = await http.get(Uri.parse(url), headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'AIChat/1.7.24',
+      }).timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200) {
+        lastMessage = 'HTTP ${resp.statusCode}';
+        return false;
+      }
+      final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+      final list = _extractTemplates(decoded);
+      if (list.isEmpty) {
+        lastMessage = 'JSON 中无有效模板';
+        return false;
+      }
+      _remote = {for (final t in list) t.id: t};
+      lastUpdatedAt = DateTime.now();
+      lastMessage = '已更新 ${list.length} 个模板';
+      return true;
+    } catch (e) {
+      lastMessage = '拉取失败: $e';
+      return false;
+    }
+  }
+
+  /// 将 raw.githubusercontent.com URL 转换为 fastly.jsdelivr.net 镜像。
+  static String? _jsdelivrMirror(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host != 'raw.githubusercontent.com') return null;
+    final segs = uri.pathSegments;
+    if (segs.length < 4) return null;
+    final owner = segs[0];
+    final repo = segs[1];
+    final branch = segs[2];
+    final filePath = segs.sublist(3).join('/');
+    return 'https://fastly.jsdelivr.net/gh/$owner/$repo@$branch/$filePath';
+  }
+
+  /// 用原始 JSON 字符串更新（本地资产 / 测试复用）。
+  bool applyJson(String rawJson) {
+    try {
+      final decoded = jsonDecode(rawJson);
+      final list = _extractTemplates(decoded);
+      if (list.isEmpty) return false;
+      _remote = {for (final t in list) t.id: t};
+      lastUpdatedAt = DateTime.now();
+      lastMessage = '已更新 ${list.length} 个模板';
+      return true;
+    } catch (e) {
+      lastMessage = '解析失败: $e';
+      return false;
+    }
+  }
+
+  List<ApiProviderTemplate> _extractTemplates(Object? decoded) {
+    if (decoded is List) {
+      return decoded
+          .whereType<Map>()
+          .map(
+              (m) => ApiProviderTemplate.fromJson(Map<String, dynamic>.from(m)))
+          .toList();
+    }
+    if (decoded is Map && decoded['templates'] is List) {
+      return (decoded['templates'] as List)
+          .whereType<Map>()
+          .map(
+              (m) => ApiProviderTemplate.fromJson(Map<String, dynamic>.from(m)))
+          .toList();
+    }
+    return const [];
+  }
+
+  /// 序列化当前生效模板为 JSON（供导出 / 调试）。
+  String toJsonString() => jsonEncode({
+        'version': '1.7.32',
+        'count': all.length,
+        'templates': all.map((t) => t.toJson()).toList(),
+      });
+}

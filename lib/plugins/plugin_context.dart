@@ -136,7 +136,7 @@ class PluginContext {
       ScaffoldMessenger.of(ctx).showSnackBar(
         SnackBar(
           content: Text(message),
-          backgroundColor: error ? Colors.redAccent : null,
+          backgroundColor: error ? Theme.of(ctx).colorScheme.error : null,
           duration: const Duration(seconds: 2),
           behavior: SnackBarBehavior.floating,
         ),
@@ -194,17 +194,57 @@ class PluginContext {
     } catch (_) {}
   }
 
-  void addReasoningStep(String type, String label, {String? content, int? resultCount, int? latencyMs}) {
-    if (!mounted) return;
+  ReasoningStep? addReasoningStep(
+    String type,
+    String label, {
+    String? content,
+    int? resultCount,
+    int? latencyMs,
+    String? pluginId,
+    String? pluginName,
+    String? toolName,
+    String status = '',
+    String? arguments,
+    String? resultSummary,
+  }) {
+    if (!mounted) return null;
+    ReasoningStep? step;
     try {
       _safeSetState(() {
-        // ReasoningStep 构造函数：ReasoningStep(this.kind, this.content, {this.resultCount, this.latencyMs})
-        assistantMsg.addReasoning(ReasoningStep(
+        step = ReasoningStep(
           type,
           content ?? label,
           resultCount: resultCount,
           latencyMs: latencyMs,
-        ));
+          pluginId: pluginId,
+          pluginName: pluginName,
+          toolName: toolName,
+          status: status,
+          arguments: arguments,
+          resultSummary: resultSummary,
+        );
+        assistantMsg.addReasoning(step!);
+      });
+    } catch (_) {}
+    return step;
+  }
+
+  void updateReasoningStep(
+    ReasoningStep? step, {
+    String? content,
+    int? latencyMs,
+    String? status,
+    String? resultSummary,
+    int? resultCount,
+  }) {
+    if (!mounted || step == null) return;
+    try {
+      _safeSetState(() {
+        if (content != null) step.content = content;
+        if (latencyMs != null) step.latencyMs = latencyMs;
+        if (status != null) step.status = status;
+        if (resultSummary != null) step.resultSummary = resultSummary;
+        if (resultCount != null) step.resultCount = resultCount;
       });
     } catch (_) {}
   }

@@ -55,14 +55,7 @@ class _DownloadConfirmDialogState extends State<DownloadConfirmDialog> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     final isZh = AppLocalizations.of(context).locale.languageCode == 'zh';
-
-    final trustBadge = switch (widget.source.trustLevel) {
-      SourceTrustLevel.official => (label: isZh ? '🟢 官方' : '🟢 Official', color: Colors.green, bg: Colors.green.shade50),
-      SourceTrustLevel.trustedThirdParty => (label: isZh ? '🟡 可信第三方' : '🟡 Trusted 3rd-party', color: Colors.orange.shade700, bg: Colors.orange.shade50),
-      SourceTrustLevel.unknown => (label: isZh ? '🔴 未知来源' : '🔴 Unknown', color: Colors.red.shade700, bg: Colors.red.shade50),
-    };
 
     return AlertDialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 16),
@@ -90,59 +83,14 @@ class _DownloadConfirmDialogState extends State<DownloadConfirmDialog> {
               Text(isZh ? '即将下载以下文件：' : 'About to download:',
                   style: Theme.of(context).textTheme.bodyMedium),
               const SizedBox(height: 14),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: isDark ? trustBadge.color.withValues(alpha: 0.18) : trustBadge.bg,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: trustBadge.color.withValues(alpha: 0.35)),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      widget.source.trustLevel == SourceTrustLevel.official
-                          ? Icons.verified_user_rounded
-                          : widget.source.trustLevel == SourceTrustLevel.trustedThirdParty
-                              ? Icons.shield_outlined
-                              : Icons.warning_amber_rounded,
-                      size: 16,
-                      color: trustBadge.color,
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(trustBadge.label,
-                          style: TextStyle(
-                              fontSize: 12.5,
-                              color: trustBadge.color,
-                              fontWeight: FontWeight.w700)),
-                    ),
-                  ],
-                ),
+              // v1.7.18（需求3）：信任徽章抽为独立 TrustBadge widget（三态）
+              TrustBadge(
+                level: widget.source.trustLevel,
+                isZh: isZh,
               ),
               const SizedBox(height: 14),
-              _InfoRow(
-                  label: isZh ? 'APP / 应用' : 'App',
-                  value: '${widget.appName} v${widget.source.version}'),
-              _InfoRow(label: isZh ? '来源' : 'Source', value: widget.source.sourceName),
-              _InfoRow(label: isZh ? '域名' : 'Domain', value: widget.source.sourceDomain),
-              _InfoRow(label: isZh ? '大小' : 'Size', value: widget.source.size),
-              _InfoRow(label: isZh ? '架构' : 'Arch', value: widget.source.arch),
-              _InfoRow(
-                  label: isZh ? '链接' : 'URL',
-                  value: widget.source.downloadUrl,
-                  isPath: true),
-              _InfoRow(
-                  label: isZh ? '文件名' : 'Filename',
-                  value: _fileName.isEmpty ? '...' : _fileName),
-              _InfoRow(
-                  label: isZh ? '保存位置' : 'Save to',
-                  value: _saveDir.isEmpty ? '...' : _saveDir,
-                  isPath: true),
-              if (widget.source.sha256 != null)
-                _InfoRow(
-                    label: isZh ? '校验' : 'SHA256',
-                    value: widget.source.sha256!,
-                    isHash: true),
+              // v1.7.19（P2）：9 个 _InfoRow 改为数据驱动列表构建，降低 build CC
+              ..._buildInfoRows(isZh),
               const SizedBox(height: 12),
               Container(
                 padding: const EdgeInsets.all(10),
@@ -176,41 +124,8 @@ class _DownloadConfirmDialogState extends State<DownloadConfirmDialog> {
                 ),
               ),
               // ===== v1.3.1 二合一关键模块：目录外 / 非官方 确定提示 =====
-              if (widget.highlightOutOfCatalog) ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: isDark
-                        ? Colors.red.withValues(alpha: 0.12)
-                        : Colors.red.shade50,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                        color: Colors.red.withValues(alpha: 0.35)),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.gpp_bad_outlined,
-                          size: 18, color: Colors.red.shade700),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          isZh
-                              ? '⚠️ 此来源不在内置官方目录中，属于第三方/联网搜索到的链接。\n'
-                                  '请确认：你知道自己在下载什么、来源域名可信、文件 SHA256（如有）与官方一致，再继续。'
-                              : '⚠️ This source is OUT OF the built-in catalog (3rd-party / online-only).\n'
-                                  'Continue only if you fully trust this URL and the SHA256 (if any) matches the official one!',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.red.shade800,
-                              height: 1.35),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              // v1.7.18（需求3）：抽为独立方法降 CC
+              if (widget.highlightOutOfCatalog) _buildOutOfCatalogWarning(isZh),
             ],
           ),
         ),
@@ -238,6 +153,154 @@ class _DownloadConfirmDialogState extends State<DownloadConfirmDialog> {
           ),
         ),
       ],
+    );
+  }
+
+  /// v1.7.18（需求3）：目录外/非官方来源风险提示（抽自 build 降 CC）
+  Widget _buildOutOfCatalogWarning(bool isZh) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: colorScheme.errorContainer.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: colorScheme.error.withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.gpp_bad_outlined, size: 18, color: colorScheme.error),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                isZh
+                    ? '⚠️ 此来源不在内置官方目录中，属于第三方/联网搜索到的链接。\n'
+                        '请确认：你知道自己在下载什么、来源域名可信、文件 SHA256（如有）与官方一致，再继续。'
+                    : '⚠️ This source is OUT OF the built-in catalog (3rd-party / online-only).\n'
+                        'Continue only if you fully trust this URL and the SHA256 (if any) matches the official one!',
+                style: TextStyle(fontSize: 12, color: colorScheme.error, height: 1.35),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildInfoRows(bool isZh) {
+    final rows = <Widget>[
+      _InfoRow(
+        label: isZh ? '应用' : 'App',
+        value: '${widget.appName} v${widget.source.version}',
+      ),
+      _InfoRow(
+        label: isZh ? '来源' : 'Source',
+        value: widget.source.sourceName,
+      ),
+      _InfoRow(
+        label: isZh ? '域名' : 'Domain',
+        value: widget.source.sourceDomain,
+      ),
+      _InfoRow(
+        label: isZh ? '大小' : 'Size',
+        value: widget.source.size,
+      ),
+      _InfoRow(
+        label: isZh ? '架构' : 'Arch',
+        value: widget.source.arch,
+      ),
+      _InfoRow(
+        label: isZh ? '下载地址' : 'URL',
+        value: widget.source.downloadUrl,
+        isPath: true,
+      ),
+      _InfoRow(
+        label: isZh ? '文件名' : 'Filename',
+        value: _fileName.isEmpty ? '...' : _fileName,
+      ),
+      _InfoRow(
+        label: isZh ? '保存到' : 'Save to',
+        value: _saveDir.isEmpty ? '...' : _saveDir,
+        isPath: true,
+      ),
+    ];
+    if (widget.source.sha256 != null) {
+      rows.add(_InfoRow(
+        label: 'SHA256',
+        value: widget.source.sha256!,
+        isHash: true,
+      ));
+    }
+    return rows;
+  }
+}
+
+/// 信任徽章（v1.7.18 需求3）—— 🟢官方 / 🟡可信第三方 / 🔴未知来源 三态。
+/// 抽自 DownloadConfirmDialog.build 的内联 Container+record，降低 build CC。
+class TrustBadge extends StatelessWidget {
+  final SourceTrustLevel level;
+  final bool isZh;
+
+  const TrustBadge({
+    super.key,
+    required this.level,
+    required this.isZh,
+  });
+
+  ({String label, Color color, Color bg}) _resolve(ColorScheme cs) {
+    return switch (level) {
+      SourceTrustLevel.official => (
+        label: isZh ? '🟢 官方' : '🟢 Official',
+        color: cs.primary,
+        bg: cs.primaryContainer.withValues(alpha: 0.18),
+      ),
+      SourceTrustLevel.trustedThirdParty => (
+        label: isZh ? '🟡 可信第三方' : '🟡 Trusted 3rd-party',
+        color: cs.tertiary,
+        bg: cs.tertiaryContainer.withValues(alpha: 0.18),
+      ),
+      SourceTrustLevel.unknown => (
+        label: isZh ? '🔴 未知来源' : '🔴 Unknown',
+        color: cs.error,
+        bg: cs.errorContainer.withValues(alpha: 0.18),
+      ),
+    };
+  }
+
+  IconData _icon() {
+    return switch (level) {
+      SourceTrustLevel.official => Icons.verified_user_rounded,
+      SourceTrustLevel.trustedThirdParty => Icons.shield_outlined,
+      SourceTrustLevel.unknown => Icons.warning_amber_rounded,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final b = _resolve(cs);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: b.bg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: b.color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Icon(_icon(), size: 16, color: b.color),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(b.label,
+                style: TextStyle(
+                    fontSize: 12.5,
+                    color: b.color,
+                    fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
     );
   }
 }

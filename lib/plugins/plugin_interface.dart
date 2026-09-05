@@ -5,6 +5,17 @@ enum PluginSource { system, installed, market }
 
 enum PluginKind { declarative, mcpRemote }
 
+extension PluginKindX on PluginKind {
+  String get displayLabel => switch (this) {
+        PluginKind.mcpRemote => 'MCP',
+        PluginKind.declarative => 'Skill',
+      };
+
+  bool get isRemote => this == PluginKind.mcpRemote;
+
+  bool get isDeclarative => this == PluginKind.declarative;
+}
+
 class PluginMetadata {
   final String id;
   final String name;

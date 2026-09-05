@@ -6,15 +6,118 @@ import 'package:http/http.dart' as http;
 import '../models/api_config.dart';
 import '../models/chat_message.dart';
 import '../models/web_search_config.dart';
+import '../models/conversation.dart';
+import '../models/plugin_hint_config.dart';
 import '../plugins/plugin_interface.dart';
 import 'logger_service.dart';
+import 'builtin_prompt_catalog.dart';
+import 'plugin_prompt_catalog.dart';
+import 'text_recognition_service.dart';
 
 /// v1.6.9：动态根据「启用的插件」生成 ReAct system prompt。
 /// 规则（来自用户）：
 ///   - 启用的插件 → 把插件的 promptProtocol 说明拼接进去（"启动版"）
 ///   - 禁用的插件 → 完全不拼接（"不启动版"）
 ///   - 市场安装的新插件 → register 时追加，顺序在 system 之后（"安装完加后面"）
-String buildReactSystemPromptFromPlugins(Iterable<ReActPlugin> enabledPlugins,
+String buildReactSystemPromptFromPlugins(
+  Iterable<ReActPlugin> enabledPlugins, {
+  bool includeThinkingGuide = true,
+  PluginHintConfig hint = const PluginHintConfig(mode: PluginHintMode.auto),
+}) {
+  // v1.7.17：一键回退——kLazyPluginProtocol=false 时走旧全量注入。
+  if (!kLazyPluginProtocol) {
+    return _legacyFullPrompt(enabledPlugins,
+        includeThinkingGuide: includeThinkingGuide);
+  }
+
+  final sb = StringBuffer();
+  final ordered = enabledPlugins.toList();
+  // v1.6.9 build42 修复问题4：前言/结尾的"搜索引导"文字此前硬编码，未随 search 插件插拔。
+  // 现在按插件实际启用状态动态生成：search 禁用 → 不再引导 AI 搜索。
+  final hasSearch = ordered.any((p) => p.triggerType == 'search');
+  final hasDownload = ordered.any((p) => p.triggerType == 'download');
+  sb.writeln();
+  if (hasSearch) {
+    sb.writeln(
+        '你目前运行在「自主联网思考循环 (ReAct)」模式中。你可以像人类查资料那样：先把自己的思考过程写出来、判断是否需要联网补信息、做一次或多次搜索、把信息纳入参考后，再给出最终回答。');
+  } else {
+    sb.writeln(
+        '你目前运行在「自主思考循环 (ReAct)」模式中。联网搜索已被禁用，请直接基于已有知识思考并回答，不要输出 <search> 标签。');
+  }
+  sb.writeln();
+  sb.writeln('=== 输出协议（必须严格遵守）===');
+  if (includeThinkingGuide) {
+    sb.writeln('1) 你写的每一段内部思考，请用 <thinking>...</thinking> 标签包裹。');
+    sb.writeln('   内容可以写：你接下来打算查什么、为什么、现在掌握了哪些关键点、缺什么信息、下一步打算怎么继续。');
+    sb.writeln(
+        '   思考是给用户看的，请用和用户提问相同的语言（用户用中文就用中文、用英文就用英文），简洁自然，不要 JSON、不要占位。');
+  }
+
+  // v1.7.17：目录层 + 格式层（完整 promptProtocol / MCP schema / Skill 正文不再常驻 system）
+  final entries = collectCatalog(ordered, hint);
+  sb.writeln();
+  sb.write(buildDirectoryAndFormatLayer(entries));
+
+  // search 被执行后的结果引导（依赖 search 插件启用）
+  if (hasSearch) {
+    sb.writeln(
+        '当你看到对话里出现从 ---TOOL RESULT START (search)--- 到 ---TOOL RESULT END (search)--- 的内容，说明你的 search 已经执行，中间是纯文本搜索结果。请基于结果继续 <thinking> 分析，或者再发一次 <search query="..." />，或者进入 <answer> / <download> / <ask_user>。');
+  }
+
+  // v1.7.17：详情按需加载说明（目录只给名字+摘要，需完整协议时输出 detail 标签索取）
+  sb.writeln();
+  sb.writeln('=== 按需加载协议（只读、无副作用）===');
+  sb.writeln('目录层只给了名字和摘要。若需某个插件的完整用法，可输出自闭合标签向宿主索取详情：');
+  sb.writeln('<plugin_detail name="..." />  —— 索取内置插件的完整协议');
+  sb.writeln(
+      '<mcp_detail plugin_id="..." tool="..." /> —— 索取某个 MCP 工具的 description + inputSchema');
+  sb.writeln('<skill_detail name="skill.xxx" /> —— 索取某个 Skill 的完整规则');
+  sb.writeln(
+      '索取到的详情会以 <toolresult kind="...">...</toolresult> 注入下一轮，之后你继续 <thinking> 分析或直接调用对应标签。');
+
+  sb.writeln();
+  sb.writeln('=== 思考轮次 / 时机 ===');
+  if (hasSearch) {
+    sb.writeln('- 不要不思考就搜索。先写 <thinking>，把"需要搜什么、为什么"说清楚，再出 <search />。');
+  }
+  sb.writeln(
+      '- 不要把最终答案写在 <thinking> 里。<answer>/<download> 之前的所有内容都是"思考过程"，默认折叠显示。');
+  // v1.7.36：反向铁律——<answer> 里只放给用户看的最终结论，禁止混入思考/推理/自我对话
+  sb.writeln(
+      '- 反过来同样严格：<answer> 标签内只能放给用户的最终结论本身，禁止混入任何推理过程、内心独白、"让我想想/我需要确认"之类的自我对话。思考一律写在 <thinking> 里。');
+  if (hasSearch) {
+    sb.writeln(
+        '- 如果用户的问题完全是常识，不用联网也能回答，就直接 <thinking>说明不需要联网搜索，理由是 XXX</thinking> 然后 <answer>回答</answer>。');
+  } else {
+    sb.writeln('- 思考完成后，用 <answer>...</answer> 包裹最终回复给用户。');
+  }
+  if (hasSearch && hasDownload) {
+    sb.writeln('- 下载场景强烈建议先搜一次「APP + 官方域名」确认官方下载页是否存在，避免让用户去第三方。');
+    sb.writeln('- ⚠️ 下载意图铁律（不可让步）：');
+    sb.writeln(
+        '  触发词：用户消息里出现「下载 / download / 帮我下 / 装个 / 安装包 / apk / 下个 / 来一份」等任意一个 + 具体应用名/文件名 → 必须输出 <download intent="true" canonical="..." platform="android|pc" keywords="..." domains="..." /> 标签。');
+    sb.writeln(
+        '  不要用 <answer> 文字描述下载步骤代替 <download> 标签——宿主不会从文字里提取下载链接，必须靠 <download> 协议触发。');
+    sb.writeln(
+        '  反例（允许 <answer>）：用户只「咨询」"Steam 是什么 / 怎么手动安装 / 哪里找官网 / 想了解 XX 的下载方式 / 哪里能下到 XX"，没让你"帮他下" → 走 <answer>；');
+    sb.writeln(
+        '  正例（必须 <download>）：「帮我下载 steam」「下个微信」「装个 tiktok」「来一份 Steam APK」→ 直接 <download>。');
+    sb.writeln(
+        '  决策优先级：缺少应用名、文件名、URL 或其他必要下载目标时，先输出 <ask_user> 补齐信息，问完再 <download>，不要绕回 <answer>。');
+    sb.writeln('  用户未说明平台时不属于信息不足，platform 默认使用 android，不必追问。');
+    sb.writeln('  只有用户明确要求在 Android、PC 等平台之间选择，或明确表示平台待选时，才用 <ask_user> 反问平台。');
+  }
+  if (hasSearch) {
+    sb.writeln('- 你只会看到"纯文本搜索结果"，看不到网页本体，不要假装你访问了一个页面。');
+  }
+  sb.writeln('- **思考期间用户可能补充信息**：你可能在 <toolresult> 之外看到一条新的 user 消息（用户中途插话）。');
+  sb.writeln('  请把它当作对当前任务的补充，自然融入下一步思考，不要把它当成新对话主题另起炉灶。');
+  sb.writeln('语言：全程与用户使用同一种语言。');
+  return sb.toString();
+}
+
+/// v1.7.17：旧全量注入实现（一键回退分支）。kLazyPluginProtocol=false 时使用。
+String _legacyFullPrompt(Iterable<ReActPlugin> enabledPlugins,
     {bool includeThinkingGuide = true}) {
   final sb = StringBuffer();
   final ordered = enabledPlugins.toList();
@@ -52,26 +155,38 @@ String buildReactSystemPromptFromPlugins(Iterable<ReActPlugin> enabledPlugins,
       others.add(p);
     }
   }
-  if (searchP != null && searchP.metadata.promptProtocol.isNotEmpty) {
-    sb.writeln('$idx) ${searchP.metadata.promptProtocol}');
+  if (searchP != null &&
+      BuiltinPromptCatalog.instance
+          .resolve(searchP.metadata.id, searchP.metadata.promptProtocol)
+          .isNotEmpty) {
+    sb.writeln(
+        '$idx) ${BuiltinPromptCatalog.instance.resolve(searchP.metadata.id, searchP.metadata.promptProtocol)}');
     idx++;
     sb.writeln(
-        '${idx - 1}.1) 当你看到对话里出现 <toolresult query="...">...</toolresult>，说明你的 search 已经被执行，这里是搜索结果。继续 <thinking> 分析，或者再发一次 <search query="..." />，或者进入 <answer> / <download> / <ask_user>。');
+        '${idx - 1}.1) 当你看到对话里出现从 ---TOOL RESULT START (search)--- 到 ---TOOL RESULT END (search)--- 的内容，说明你的 search 已经执行，中间是纯文本搜索结果。请基于结果继续 <thinking> 分析，或者再发一次 <search query="..." />，或者进入 <answer> / <download> / <ask_user>。');
   }
   // 其他插件（download / ask_user / self_check / 第三方 market 插件）按注册顺序追加
   for (final p in others) {
-    if (p.metadata.promptProtocol.isEmpty) continue;
-    sb.writeln('$idx) ${p.metadata.promptProtocol}');
+    if (BuiltinPromptCatalog.instance
+        .resolve(p.metadata.id, p.metadata.promptProtocol)
+        .isEmpty) {
+      continue;
+    }
+    sb.writeln(
+        '$idx) ${BuiltinPromptCatalog.instance.resolve(p.metadata.id, p.metadata.promptProtocol)}');
     idx++;
   }
-  if (answerP != null && answerP.metadata.promptProtocol.isNotEmpty) {
-    sb.writeln('$idx) ${answerP.metadata.promptProtocol}');
+  if (answerP != null &&
+      BuiltinPromptCatalog.instance
+          .resolve(answerP.metadata.id, answerP.metadata.promptProtocol)
+          .isNotEmpty) {
+    sb.writeln(
+        '$idx) ${BuiltinPromptCatalog.instance.resolve(answerP.metadata.id, answerP.metadata.promptProtocol)}');
     idx++;
   }
 
-  final mcpPlugins = ordered
-      .where((p) => p.metadata.kind == PluginKind.mcpRemote)
-      .toList(growable: false);
+  final mcpPlugins =
+      ordered.where((p) => p.metadata.kind.isRemote).toList(growable: false);
   if (mcpPlugins.isNotEmpty) {
     sb.writeln('$idx) MCP 远程工具协议：只能调用下面列出的 plugin_id 和 tool。');
     sb.writeln(
@@ -102,6 +217,42 @@ String buildReactSystemPromptFromPlugins(Iterable<ReActPlugin> enabledPlugins,
     }
     idx++;
   }
+
+  // v1.7.12：Skill 清单注入。MCP 能被 AI 感知是因为它有结构化 tools 列表枚举，
+  // 但 Skill 之前只拼 promptProtocol 纯文本正文，AI 没有"我有 N 个 Skill"的清单感。
+  // 这里像 MCP 一样把 declarative 插件（Skill + 内置声明式插件）列出来，
+  // 并新增 <skill_call name="..."> 调用协议，让 AI 能明确感知 Skill 存在并按名调用。
+  final skillPlugins = ordered
+      .where((p) => p.metadata.kind.isDeclarative)
+      .where((p) => p.source != PluginSource.system)
+      .toList(growable: false);
+  if (skillPlugins.isNotEmpty) {
+    sb.writeln('$idx) Skill 声明式协议：以下 Skill 已安装并启用，可以按名称调用或触发其规则。');
+    sb.writeln(
+        '   调用方式 1（按名）：输出 <skill_call name="skill.xxx">optional JSON</skill_call>，宿主会把 Skill 的 promptProtocol 注入为系统规则并继续思考。');
+    sb.writeln(
+        '   调用方式 2（自然触发）：当用户意图明显命中某个 Skill 的触发时机时，你不需要显式输出 <skill_call>，按照 Skill promptProtocol 描述的规则行事即可。');
+    sb.writeln('   已安装 Skill 清单（共 ${skillPlugins.length} 个）：');
+    const skillBudget = 3000;
+    var skillUsed = 0;
+    for (final p in skillPlugins) {
+      final m = p.metadata;
+      // 优先用安装时写入 extra 的结构化 summary，没有就退化拼一个
+      final extraSummary = m.extra['skillSummary']?.toString() ?? '';
+      final summary = extraSummary.isNotEmpty
+          ? extraSummary
+          : '${m.name} | type=${p.triggerType} | 触发: 当涉及"${_truncate(m.description, 20)}"';
+      final line = '   - [${m.id}] $summary';
+      if (skillUsed + line.length > skillBudget) {
+        sb.writeln(
+            '   … 还有 ${skillPlugins.length - skillPlugins.indexOf(p)} 个 Skill 未列出，请参见插件管理页面。');
+        break;
+      }
+      sb.writeln(line);
+      skillUsed += line.length;
+    }
+    idx++;
+  }
   sb.writeln();
   sb.writeln('=== 思考轮次 / 时机 ===');
   if (hasSearch) {
@@ -117,7 +268,23 @@ String buildReactSystemPromptFromPlugins(Iterable<ReActPlugin> enabledPlugins,
   }
   if (hasSearch && hasDownload) {
     sb.writeln('- 下载场景强烈建议先搜一次「APP + 官方域名」确认官方下载页是否存在，避免让用户去第三方。');
-    sb.writeln('- ⚠️ 用户明确想下载某文件/APP 时，最终必须输出 <download intent="true" .../> 标签（而不是用 <answer> 文字描述下载步骤）。信息不足（如不知道要手机版还是电脑版）时，先用 <ask_user> 反问，问完再输出 <download>。');
+    // v1.7.13 强化：原措辞"用户明确想下载"留给 AI 自由解读空间，
+    // AI 把"帮我下载个steam"解释成"咨询下载方式"而非"执行下载"，
+    // 导致 4 次请求才出 <download> 标签（nexus_export_2026-08-25T10-51-47）。
+    // 现改为：列出触发关键词清单 + 给反例 + 强制"必须输出 <download>"。
+    sb.writeln('- ⚠️ 下载意图铁律（不可让步）：');
+    sb.writeln(
+        '  触发词：用户消息里出现「下载 / download / 帮我下 / 装个 / 安装包 / apk / 下个 / 来一份」等任意一个 + 具体应用名/文件名 → 必须输出 <download intent="true" canonical="..." platform="android|pc" keywords="..." domains="..." /> 标签。');
+    sb.writeln(
+        '  不要用 <answer> 文字描述下载步骤代替 <download> 标签——宿主不会从文字里提取下载链接，必须靠 <download> 协议触发。');
+    sb.writeln(
+        '  反例（允许 <answer>）：用户只「咨询」"Steam 是什么 / 怎么手动安装 / 哪里找官网 / 想了解 XX 的下载方式 / 哪里能下到 XX"，没让你"帮他下" → 走 <answer>；');
+    sb.writeln(
+        '  正例（必须 <download>）：「帮我下载 steam」「下个微信」「装个 tiktok」「来一份 Steam APK」→ 直接 <download>。');
+    sb.writeln(
+        '  决策优先级：缺少应用名、文件名、URL 或其他必要下载目标时，先输出 <ask_user> 补齐信息，问完再 <download>，不要绕回 <answer>。');
+    sb.writeln('  用户未说明平台时不属于信息不足，platform 默认使用 android，不必追问。');
+    sb.writeln('  只有用户明确要求在 Android、PC 等平台之间选择，或明确表示平台待选时，才用 <ask_user> 反问平台。');
   }
   if (hasSearch) {
     sb.writeln('- 你只会看到"纯文本搜索结果"，看不到网页本体，不要假装你访问了一个页面。');
@@ -128,49 +295,50 @@ String buildReactSystemPromptFromPlugins(Iterable<ReActPlugin> enabledPlugins,
   return sb.toString();
 }
 
+/// v1.7.12：截断字符串到 maxLen，超限追加省略号。用于 Skill 清单简介的预算控制。
+String _truncate(String s, int maxLen) {
+  if (s.length <= maxLen) return s;
+  return '${s.substring(0, maxLen)}…';
+}
+
 class ApiService extends ChangeNotifier {
   bool _isGenerating = false;
   bool get isGenerating => _isGenerating;
 
   // v1.3.6：token 用量统计
-  int _totalPromptTokens = 0;
-  int _totalCompletionTokens = 0;
-  int _totalAllTokens = 0;
-  int get totalPromptTokens => _totalPromptTokens;
-  int get totalCompletionTokens => _totalCompletionTokens;
-  int get totalAllTokens => _totalAllTokens;
-
-  void resetTokenCounters() {
-    _totalPromptTokens = 0;
-    _totalCompletionTokens = 0;
-    _totalAllTokens = 0;
-  }
-
-  void _accumulateUsage(Map<String, dynamic>? usage) {
-    if (usage == null) return;
-    final pt = usage['prompt_tokens'] as int?;
-    final ct = usage['completion_tokens'] as int?;
-    final tt = usage['total_tokens'] as int?;
-    if (pt != null) _totalPromptTokens += pt;
-    if (ct != null) _totalCompletionTokens += ct;
-    if (tt != null) _totalAllTokens += tt;
+  // v1.7.26 (D1)：改为请求级归账——实例级共享计数器在多请求 / ReAct 摘要时互相污染。
+  // streamChat / completeChat 各自累计本次请求 usage，通过 onUsage 回调回传给调用方；
+  // 摘要等后台 completeChat 不传 onUsage → 完全不进入 UI 展示。
+  ({int prompt, int completion, int total}) _extractUsage(
+      Map<String, dynamic>? usage) {
+    final pt = usage?['prompt_tokens'] as int? ?? 0;
+    final ct = usage?['completion_tokens'] as int? ?? 0;
+    final tt = usage?['total_tokens'] as int? ?? 0;
+    return (prompt: pt, completion: ct, total: tt);
   }
 
   // v1.7.9 (M4 修复)：单例 _client/_shouldStop → 并发 streamChat 时第二次调用
   // 覆盖 _client、第一个流的 finally 会 close 掉第二个流的 client（互相掐死）。
   // 改为"活跃流集合"：每次 streamChat 持有自己的 client 和停止标志，
   // stopGeneration 停止全部活跃流，finally 只 close 自己的 client。
+  // v1.7.26 (D5)：新增 scope 维度——页面只停自己（传 conversation.id），
+  // 不传 scope 时保持旧语义停止全部（测试/dispose 兜底用）。
   final List<http.Client> _activeClients = [];
   final List<List<bool>> _activeStopFlags = [];
+  final List<String?> _activeScopes = [];
 
-  void stopGeneration() {
-    for (final flag in _activeStopFlags) {
-      flag[0] = true;
+  void stopGeneration({String? scope}) {
+    for (var i = 0; i < _activeStopFlags.length; i++) {
+      if (scope == null || _activeScopes[i] == scope) {
+        _activeStopFlags[i][0] = true;
+      }
     }
-    for (final client in _activeClients) {
-      try {
-        client.close();
-      } catch (_) {}
+    for (var i = 0; i < _activeClients.length; i++) {
+      if (scope == null || _activeScopes[i] == scope) {
+        try {
+          _activeClients[i].close();
+        } catch (_) {}
+      }
     }
     LoggerService.instance.info('Generation stopped by user', tag: 'Api');
   }
@@ -200,15 +368,27 @@ class ApiService extends ChangeNotifier {
           textParts.add('📎 ${a.fileName}:\n${a.extractedText}');
         }
       }
+      if (!config.supportVision) {
+        for (final a in imgAtts) {
+          final ocr = await TextRecognitionService()
+              .recognizeImagePath(a.localPath!);
+          final ocrText = ocr.isUsable ? ocr.text : '[未识别到文字]';
+          textParts.add('📎 ${a.fileName}（本机 OCR）:\n$ocrText');
+          LoggerService.instance.info(
+              'OCR fallback: file=${a.fileName}, chars=${ocr.charCount}, ms=${ocr.durationMs}',
+              tag: 'Api');
+        }
+      }
       final baseText = textParts.isEmpty
           ? msg.content
           : '${textParts.join('\n\n')}\n\n${msg.content}';
-      if (imgAtts.isNotEmpty) {
+      final imagePayloads = config.supportVision ? imgAtts : <MessageAttachment>[];
+      if (imagePayloads.isNotEmpty) {
         final contentArr = <Map<String, dynamic>>[];
         if (baseText.isNotEmpty) {
           contentArr.add({'type': 'text', 'text': baseText});
         }
-        for (final a in imgAtts) {
+        for (final a in imagePayloads) {
           try {
             final bytes = await File(a.localPath!).readAsBytes();
             final b64 = base64Encode(bytes);
@@ -235,6 +415,10 @@ class ApiService extends ChangeNotifier {
     required List<ChatMessage> messages,
     String? reasoningEffort,
     bool yieldReasoning = false,
+    // v1.7.26 (D5)：页面级停止作用域（不传则只参与"停止全部"）
+    String? stopScope,
+    // v1.7.26 (D1)：流结束回传本次请求 token usage
+    void Function(int prompt, int completion, int total)? onUsage,
   }) async* {
     _isGenerating = true;
     notifyListeners();
@@ -243,11 +427,16 @@ class ApiService extends ChangeNotifier {
     int chunkCount = 0;
     int totalChars = 0;
     final t0 = DateTime.now();
+    // v1.7.26 (D1)：本次请求的 usage 归账（不再写共享计数器）
+    int reqPrompt = 0;
+    int reqCompletion = 0;
+    int reqTotal = 0;
     // v1.7.9 (M4)：本流私有的 client 与停止标志
     final client = http.Client();
     final stopFlag = <bool>[false];
     _activeClients.add(client);
     _activeStopFlags.add(stopFlag);
+    _activeScopes.add(stopScope);
 
     try {
       final url = Uri.parse(config.chatEndpoint);
@@ -280,16 +469,48 @@ class ApiService extends ChangeNotifier {
           tag: 'Api');
 
       // v1.7.9 (M4)：局部 client，不再覆盖单例字段
-      final request = http.Request('POST', url);
-      request.headers['Content-Type'] = 'application/json';
-      // v1.3.9：本地模型（Ollama / LM Studio）无需 Authorization，
-      // apiKey 为空时不发该 header，避免某些本地代理误判 Bearer 而拒绝
-      if (config.apiKey.isNotEmpty) {
-        request.headers['Authorization'] = 'Bearer ${config.apiKey}';
+      // v1.7.25：400 兜底——部分模型不支持 reasoning_effort → 去掉该参数重试一次
+      Future<http.StreamedResponse> postStream(String body) async {
+        final req = http.Request('POST', url);
+        req.headers['Content-Type'] = 'application/json';
+        // v1.3.9：本地模型无需 Authorization，apiKey 为空时不发该 header
+        if (config.apiKey.isNotEmpty) {
+          req.headers['Authorization'] = 'Bearer ${config.apiKey}';
+        }
+        req.body = body;
+        return client.send(req);
       }
-      request.body = requestBody;
 
-      final response = await client.send(request);
+      var response = await postStream(requestBody);
+      final hasEffort = reasoningEffort != null && reasoningEffort.isNotEmpty;
+      // v1.7.26 (D2)：仅 400/422（参数不被支持）才去掉 reasoning_effort 重试一次，
+      // 其他非 200（限流/鉴权/网关）不做无意义重试
+      if ((response.statusCode == 400 || response.statusCode == 422) &&
+          hasEffort) {
+        final firstErr = await response.stream.bytesToString();
+        final stripped = json.decode(requestBody) as Map<String, dynamic>;
+        stripped.remove('reasoning_effort');
+        final retryResp = await postStream(json.encode(stripped));
+        if (retryResp.statusCode == 200) {
+          log.warn(
+              '[Api] non-200 with reasoning_effort, retried without it (success)',
+              tag: 'Api');
+          response = retryResp;
+        } else {
+          await retryResp.stream.drain<void>();
+          String errorMsg;
+          try {
+            final errorJson = json.decode(firstErr);
+            errorMsg = errorJson['error']?['message'] ?? firstErr;
+          } catch (_) {
+            errorMsg = 'HTTP ${response.statusCode}: $firstErr';
+          }
+          log.error(
+              '[Api] retry without reasoning_effort also failed; original error',
+              tag: 'Api');
+          throw Exception(errorMsg);
+        }
+      }
       log.info(
           'Response status=${response.statusCode} length=${response.contentLength ?? "unknown"}',
           tag: 'Api');
@@ -310,10 +531,22 @@ class ApiService extends ChangeNotifier {
       }
 
       final buffer = StringBuffer();
-      await for (final chunk in response.stream.transform(utf8.decoder)) {
+      const maxBufferBytes = 1 * 1024 * 1024; // 1MB 上限
+      var droppedChars = 0;
+      // v1.7.26 (D3)：SSE 空闲超时——30 秒无数据视为静默中断，避免流永远挂起
+      await for (final chunk in response.stream
+          .transform(utf8.decoder)
+          .timeout(const Duration(seconds: 30))) {
         if (stopFlag[0]) break;
 
         buffer.write(chunk);
+        if (buffer.length > maxBufferBytes) {
+          LoggerService.instance.warn(
+              'SSE buffer exceeded ${maxBufferBytes ~/ 1024}KB, resetting',
+              tag: 'SSE');
+          buffer.clear();
+          continue;
+        }
         final lines = buffer.toString().split('\n');
         buffer.clear();
 
@@ -333,8 +566,13 @@ class ApiService extends ChangeNotifier {
           try {
             final jsonMap = json.decode(data) as Map<String, dynamic>;
             // v1.3.6：提取 usage（多数 API 在最后一个 chunk 带上 usage）
+            // v1.7.26 (D1)：请求级归账，不再写共享计数器
             if (jsonMap['usage'] != null) {
-              _accumulateUsage(jsonMap['usage'] as Map<String, dynamic>);
+              final u =
+                  _extractUsage(jsonMap['usage'] as Map<String, dynamic>?);
+              reqPrompt += u.prompt;
+              reqCompletion += u.completion;
+              reqTotal += u.total;
             }
             final choices = jsonMap['choices'] as List?;
             if (choices != null && choices.isNotEmpty) {
@@ -361,15 +599,22 @@ class ApiService extends ChangeNotifier {
               }
             }
           } catch (e) {
-            // Skip malformed JSON chunks
+            // v1.7.16：累计被丢弃的畸形 chunk 字符数，流结束统一告警，避免回答被截断却无感知
+            droppedChars += data.length;
             debugPrint('Parse error: $e');
-            log.warn('Malformed SSE chunk skipped: $e', tag: 'Api');
           }
         }
+      }
+      if (droppedChars > 0) {
+        log.warn('流式响应有 $droppedChars 字符因解析失败被丢弃，回答可能不完整', tag: 'Api');
       }
       final ms = DateTime.now().difference(t0).inMilliseconds;
       log.info('Stream done in ${ms}ms, chunks=$chunkCount, chars=$totalChars',
           tag: 'Api');
+    } on TimeoutException catch (e) {
+      log.error('SSE stream idle timeout (30s) during streamChat',
+          error: e, tag: 'Api');
+      throw Exception('响应超时：30 秒内未收到数据，请检查网络或重试');
     } on SocketException catch (e, st) {
       log.error('SocketException during streamChat',
           error: e, stack: st, tag: 'Api');
@@ -382,12 +627,16 @@ class ApiService extends ChangeNotifier {
       // v1.7.9 (M4)：只清理本流的资源，不影响其他活跃流
       _activeClients.remove(client);
       _activeStopFlags.remove(stopFlag);
+      // v1.7.26 (D5)：清理 scope 条目
+      _activeScopes.remove(stopScope);
       try {
         client.close();
       } catch (_) {}
       if (_activeClients.isEmpty) {
         _isGenerating = false;
       }
+      // v1.7.26 (D1)：流结束（无论成败）回传本次请求 usage 归账
+      onUsage?.call(reqPrompt, reqCompletion, reqTotal);
       notifyListeners();
     }
   }
@@ -552,6 +801,33 @@ class ApiService extends ChangeNotifier {
     return reasoningEffortFromRounds(cfg.reactMaxRounds);
   }
 
+  /// 每对话独有思考强度 → reasoning_effort
+  /// [c.reasoningEffort]：0.0=默认(跟随思考程度轮数映射) 0.1–1.0 连续小数
+  ///   ≤0.33→'low'，≤0.66→'medium'，否则→'high'
+  /// [inReAct]：ReAct 循环内 true → 默认档跟随轮数映射；普通流式 false → 默认档不传（保持现状）
+  static String? reasoningEffortForConversation(Conversation c,
+      {bool inReAct = false}) {
+    final v = c.reasoningEffort;
+    if (v > 0) {
+      if (v <= 0.33) return 'low';
+      if (v <= 0.66) return 'medium';
+      return 'high';
+    }
+    // 默认（0）
+    if (!inReAct) return null;
+    if (!c.reactEnabled || c.reactMaxRounds <= 0) return null;
+    if (c.reactAutoMode) return 'high';
+    return reasoningEffortFromRounds(c.reactMaxRounds);
+  }
+
+  /// 思考强度小数 → ReAct 最大轮数（让中间小数有真实可衡量效果）
+  /// v<=0 → 0（不覆盖，沿用 conversation.reactMaxRounds）
+  /// 否则 (2 + v*10).round()：0.1→3 轮 … 1.0→12 轮
+  static int reasoningRoundsForValue(double v) {
+    if (v <= 0) return 0;
+    return (2 + v * 10).round();
+  }
+
   // ==========================================================================
   // v1.4.2：token 估算工具方法（用于自动压缩触发判断）
   // ==========================================================================
@@ -580,100 +856,153 @@ class ApiService extends ChangeNotifier {
     String? reasoningEffort,
     Map<String, dynamic>? extraBody,
     Duration timeout = const Duration(seconds: 90),
+    // v1.7.26 (D5)：调用方可传作用域，支持 stopGeneration(scope: ...) 停止本请求
+    String? stopScope,
+    // v1.7.26 (D1)：回传本次请求 token usage（摘要等后台调用不传 → 不进 UI）
+    void Function(int prompt, int completion, int total)? onUsage,
   }) async {
     final log = LoggerService.instance;
     final url = Uri.parse(config.chatEndpoint);
     final msgList = await _buildMessagesPayload(config, messages);
+    // v1.7.26 (D4)：非流式请求也注册到活跃集合，支持 scope 级停止
+    final client = http.Client();
+    final stopFlag = <bool>[false];
+    _activeClients.add(client);
+    _activeStopFlags.add(stopFlag);
+    _activeScopes.add(stopScope);
+    // v1.7.26 (D1)：本次请求的 usage 归账（不再写共享计数器）
+    int reqPrompt = 0;
+    int reqCompletion = 0;
+    int reqTotal = 0;
+    try {
+      final body = <String, dynamic>{
+        'model': config.model,
+        'messages': msgList,
+        'temperature': config.temperature,
+        'top_p': config.topP,
+        'max_tokens': config.maxTokens,
+        'stream': false,
+        if (reasoningEffort != null && reasoningEffort.isNotEmpty)
+          'reasoning_effort': reasoningEffort,
+      };
+      if (extraBody != null) body.addAll(extraBody);
 
-    final body = <String, dynamic>{
-      'model': config.model,
-      'messages': msgList,
-      'temperature': config.temperature,
-      'top_p': config.topP,
-      'max_tokens': config.maxTokens,
-      'stream': false,
-      if (reasoningEffort != null && reasoningEffort.isNotEmpty)
-        'reasoning_effort': reasoningEffort,
-    };
-    if (extraBody != null) body.addAll(extraBody);
-
-    log.info(
-      '[Api] completeChat ${config.model} | msgs=${msgList.length} | '
-      'effort=${reasoningEffort ?? '(none)'} | maxTokens=${config.maxTokens}',
-      tag: 'Api',
-    );
-    log.verbose(
-        '[Api] completeChat request messages:\n${msgList.map((m) {
-          final c = m['content'];
-          final s = c is String ? c : json.encode(c);
-          final cut = s.length > 300 ? '${s.substring(0, 300)}...' : s;
-          return '  [${m['role']}] $cut';
-        }).join('\n')}',
-        tag: 'Api');
-    final resp = await http
-        .post(
-          url,
-          headers: {
-            'Content-Type': 'application/json',
-            // v1.3.9：本地模型 apiKey 为空时不发 Authorization
-            if (config.apiKey.isNotEmpty)
-              'Authorization': 'Bearer ${config.apiKey}',
-          },
-          body: json.encode(body),
-        )
-        .timeout(timeout);
-
-    if (resp.statusCode != 200) {
-      // v1.4.2 安全加固：日志里写完整 body（logger 会自动脱敏），但用户可见错误消息
-      // 只展示通用错误描述 + HTTP 状态码，避免在 SnackBar 里泄露上游原始错误体。
-      log.error(
-          '[Api] completeChat HTTP ${resp.statusCode} body(orig)=${resp.body}',
+      log.info(
+        '[Api] completeChat ${config.model} | msgs=${msgList.length} | '
+        'effort=${reasoningEffort ?? '(none)'} | maxTokens=${config.maxTokens}',
+        tag: 'Api',
+      );
+      log.verbose(
+          '[Api] completeChat request messages:\n${msgList.map((m) {
+            final c = m['content'];
+            final s = c is String ? c : json.encode(c);
+            final cut = s.length > 300 ? '${s.substring(0, 300)}...' : s;
+            return '  [${m['role']}] $cut';
+          }).join('\n')}',
           tag: 'Api');
-      String userMsg;
+      // v1.7.26 (D4)：改用可关闭的 client.request，支持 stopGeneration(scope:) 中途停止
+      Future<http.Response> post(String bodyStr) async {
+        if (stopFlag[0]) throw Exception('已停止');
+        final req = http.Request('POST', url);
+        req.headers['Content-Type'] = 'application/json';
+        // v1.3.9：本地模型 apiKey 为空时不发 Authorization
+        if (config.apiKey.isNotEmpty) {
+          req.headers['Authorization'] = 'Bearer ${config.apiKey}';
+        }
+        req.body = bodyStr;
+        final streamed = await client.send(req).timeout(timeout);
+        return http.Response.fromStream(streamed);
+      }
+
+      var resp = await post(json.encode(body));
+      final hasEffort = reasoningEffort != null && reasoningEffort.isNotEmpty;
+      // v1.7.26 (D2)：仅 400/422（参数不被支持）才去掉 reasoning_effort 重试一次，
+      // 其他非 200（限流/鉴权/网关）不做无意义重试
+      if ((resp.statusCode == 400 || resp.statusCode == 422) && hasEffort) {
+        // v1.7.25 兜底：部分模型不支持 reasoning_effort → 去掉该参数重试一次
+        final stripped = Map<String, dynamic>.from(body)
+          ..remove('reasoning_effort');
+        final retry = await post(json.encode(stripped));
+        if (retry.statusCode == 200) {
+          log.warn(
+              '[Api] completeChat non-200 with reasoning_effort, retried without it (success)',
+              tag: 'Api');
+          resp = retry;
+        }
+      }
+
+      if (resp.statusCode != 200) {
+        // v1.4.2 安全加固：日志里写完整 body（logger 会自动脱敏），但用户可见错误消息
+        // 只展示通用错误描述 + HTTP 状态码，避免在 SnackBar 里泄露上游原始错误体。
+        log.error(
+            '[Api] completeChat HTTP ${resp.statusCode} body(orig)=${resp.body}',
+            tag: 'Api');
+        String userMsg;
+        try {
+          final e = json.decode(resp.body);
+          userMsg = e['error']?['message'] ?? 'HTTP ${resp.statusCode}';
+        } on Exception catch (_) {
+          // 非 JSON 错误体（比如 HTML 登录页 / 502 网关页），不给用户看原始内容
+          userMsg = 'HTTP ${resp.statusCode} — 服务端返回了非标准错误（已写入详细日志）';
+        }
+        throw Exception(userMsg);
+      }
+
+      final j = json.decode(resp.body) as Map<String, dynamic>;
+      // v1.3.6：提取 token usage
+      // v1.7.26 (D1)：请求级归账，不再写共享计数器
+      final u = _extractUsage(j['usage'] as Map<String, dynamic>?);
+      reqPrompt += u.prompt;
+      reqCompletion += u.completion;
+      reqTotal += u.total;
+      // v1.6.8 修复 Bug#3：choices 空数组时 .first 抛 StateError（同 testConnection L273 已修过，completeChat 漏修）
+      final choices = j['choices'] as List? ?? [];
+      if (choices.isEmpty) {
+        throw Exception('服务器返回 200 但 choices 为空');
+      }
+      // v1.7.16 修复：message 可能为 null（tool_call/空 content 边界响应），
+      // 与 testConnection 保持一致，用 `?` + 空表兜底，避免 CastError。
+      final message =
+          (choices.first['message'] as Map<String, dynamic>?) ?? const {};
+
+      // 兼容 o1 / DeepSeek R1：返回 content 可能是 reasoning_content + content 结构
+      final reasoningContent = message['reasoning_content']?.toString() ?? '';
+      final content = message['content']?.toString() ?? '';
+      log.verbose(
+          '[Api] completeChat response: reasoningLen=${reasoningContent.length}, contentLen=${content.length}\n  content(500): ${content.substring(0, content.length > 500 ? 500 : content.length)}',
+          tag: 'Api');
+      if (reasoningContent.isNotEmpty) {
+        // v1.4.1 修复：ReAct 模式下 content 本身就是协议输出（<ask_user>/<search>/<thinking>/<answer>/<download>），
+        // 不能再外包 <answer>，否则 _parseReActOutput 会把嵌套内容全吞进 answer 块，导致反问/搜索/循环全失效。
+        // 只有 content 是纯文本最终答案（不含任何 ReAct 标签）时才包 <answer>。
+        if (content.isEmpty) {
+          return '<thinking>$reasoningContent</thinking>';
+        }
+        // M13 fix: 改用更严格的标签匹配，避免 <thinking_revised> 等变体被误判
+        final hasReActTag = RegExp(
+          r'<(thinking|search|answer|ask_user|download|self_check|mcp_call|skill_call)(\s|>|/>)',
+          caseSensitive: false,
+        ).hasMatch(content);
+        if (hasReActTag) {
+          return '<thinking>$reasoningContent</thinking>\n$content';
+        }
+        return '<thinking>$reasoningContent</thinking>\n<answer>$content</answer>';
+      }
+      return content;
+    } finally {
+      // v1.7.26 (D4/D5)：清理本请求的注册与资源
+      _activeClients.remove(client);
+      _activeStopFlags.remove(stopFlag);
+      _activeScopes.remove(stopScope);
       try {
-        final e = json.decode(resp.body);
-        userMsg = e['error']?['message'] ?? 'HTTP ${resp.statusCode}';
-      } on Exception catch (_) {
-        // 非 JSON 错误体（比如 HTML 登录页 / 502 网关页），不给用户看原始内容
-        userMsg = 'HTTP ${resp.statusCode} — 服务端返回了非标准错误（已写入详细日志）';
+        client.close();
+      } catch (_) {}
+      if (_activeClients.isEmpty) {
+        _isGenerating = false;
       }
-      throw Exception(userMsg);
+      // v1.7.26 (D1)：回传本次请求 usage（无论成败）
+      onUsage?.call(reqPrompt, reqCompletion, reqTotal);
     }
-
-    final j = json.decode(resp.body) as Map<String, dynamic>;
-    // v1.3.6：提取 token usage
-    _accumulateUsage(j['usage'] as Map<String, dynamic>?);
-    // v1.6.8 修复 Bug#3：choices 空数组时 .first 抛 StateError（同 testConnection L273 已修过，completeChat 漏修）
-    final choices = j['choices'] as List? ?? [];
-    if (choices.isEmpty) {
-      throw Exception('服务器返回 200 但 choices 为空');
-    }
-    final message = (choices.first['message'] as Map<String, dynamic>);
-
-    // 兼容 o1 / DeepSeek R1：返回 content 可能是 reasoning_content + content 结构
-    final reasoningContent = message['reasoning_content']?.toString() ?? '';
-    final content = message['content']?.toString() ?? '';
-    log.verbose(
-        '[Api] completeChat response: reasoningLen=${reasoningContent.length}, contentLen=${content.length}\n  content(500): ${content.substring(0, content.length > 500 ? 500 : content.length)}',
-        tag: 'Api');
-    if (reasoningContent.isNotEmpty) {
-      // v1.4.1 修复：ReAct 模式下 content 本身就是协议输出（<ask_user>/<search>/<thinking>/<answer>/<download>），
-      // 不能再外包 <answer>，否则 _parseReActOutput 会把嵌套内容全吞进 answer 块，导致反问/搜索/循环全失效。
-      // 只有 content 是纯文本最终答案（不含任何 ReAct 标签）时才包 <answer>。
-      if (content.isEmpty) {
-        return '<thinking>$reasoningContent</thinking>';
-      }
-      // M13 fix: 改用更严格的标签匹配，避免 <thinking_revised> 等变体被误判
-      final hasReActTag = RegExp(
-        r'<(thinking|search|answer|ask_user|download|self_check|mcp_call)(\s|>|/>)',
-        caseSensitive: false,
-      ).hasMatch(content);
-      if (hasReActTag) {
-        return '<thinking>$reasoningContent</thinking>\n$content';
-      }
-      return '<thinking>$reasoningContent</thinking>\n<answer>$content</answer>';
-    }
-    return content;
   }
 
   // ==========================================================================

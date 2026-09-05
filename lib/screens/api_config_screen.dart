@@ -4,6 +4,7 @@ import '../l10n/app_localizations.dart';
 import '../models/api_config.dart';
 import '../services/storage_service.dart';
 import 'api_config_edit_screen.dart';
+import '../widgets/vendor_avatar.dart';
 
 class ApiConfigScreen extends StatefulWidget {
   const ApiConfigScreen({super.key});
@@ -64,10 +65,10 @@ class _ApiConfigScreenState extends State<ApiConfigScreen> {
                     return Dismissible(
                       key: Key(config.id),
                       background: Container(
-                        color: Colors.red,
+                        color: Theme.of(context).colorScheme.error,
                         alignment: Alignment.centerRight,
                         padding: const EdgeInsets.only(right: 20),
-                        child: const Icon(Icons.delete, color: Colors.white),
+                        child: Icon(Icons.delete, color: Theme.of(context).colorScheme.onError),
                       ),
                       direction: DismissDirection.endToStart,
                       onDismissed: (_) async {
@@ -78,9 +79,9 @@ class _ApiConfigScreenState extends State<ApiConfigScreen> {
                       },
                       child: ListTile(
                         leading: CircleAvatar(
-                          backgroundColor:
-                              Theme.of(context).colorScheme.primaryContainer,
-                          child: const Icon(Icons.cloud),
+                          backgroundColor: Colors.transparent,
+                          child: VendorAvatar(
+                              templateId: config.templateId, size: 28),
                         ),
                         title: Text(config.name),
                         subtitle: Text('${config.baseUrl} • ${config.model}'),
@@ -103,7 +104,7 @@ class _ApiConfigScreenState extends State<ApiConfigScreen> {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => ApiConfigEditScreen(config: null),
+              builder: (_) => const ApiConfigEditScreen(config: null),
             ),
           ).then((_) => _loadData());
         },

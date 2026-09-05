@@ -108,7 +108,7 @@ class _OnboardingLanguageScreenState extends State<OnboardingLanguageScreen> {
                               await provider
                                   .setLocale(Locale(_selectedCode!));
                               await provider.completeOnboarding();
-                              if (mounted) {
+                              if (context.mounted) {
                                 Navigator.of(context).pushReplacement(
                                   MaterialPageRoute(
                                     builder: (_) =>

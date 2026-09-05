@@ -31,15 +31,106 @@ extension MessageRoleExtension on MessageRole {
 
 /// v1.3.1 build 11: ReAct 协议每一步（内存级，不落库）
 /// kind: 'thinking' | 'search' | 'search_result'
+/// v1.7.22: 新增 phase（阶段）和 round（轮次）字段，支持思考过程分类折叠
 class ReasoningStep {
   final String kind;
-  /// thinking = 思考文本 / search = query / search_result = 摘要
   String content;
-  final int? resultCount;   // search_result: 返回结果数
-  final int? latencyMs;     // search_result: 耗时 ms
+  int? resultCount;
+  int? latencyMs;
   final DateTime ts;
-  ReasoningStep(this.kind, this.content, {this.resultCount, this.latencyMs})
-      : ts = DateTime.now();
+  final String phase;
+  final int round;
+  String? pluginId;
+  String? pluginName;
+  String? toolName;
+  String status;
+  String? arguments;
+  String? resultSummary;
+
+  ReasoningStep(this.kind, this.content, {
+    this.resultCount,
+    this.latencyMs,
+    this.phase = '',
+    this.round = 0,
+    this.pluginId,
+    this.pluginName,
+    this.toolName,
+    this.status = '',
+    this.arguments,
+    this.resultSummary,
+  }) : ts = DateTime.now();
+
+  ReasoningStep._({
+    required this.kind,
+    required this.content,
+    this.resultCount,
+    this.latencyMs,
+    required this.ts,
+    this.phase = '',
+    this.round = 0,
+    this.pluginId,
+    this.pluginName,
+    this.toolName,
+    this.status = '',
+    this.arguments,
+    this.resultSummary,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'kind': kind,
+        'content': content,
+        if (resultCount != null) 'resultCount': resultCount,
+        if (latencyMs != null) 'latencyMs': latencyMs,
+        'ts': ts.toIso8601String(),
+        if (phase.isNotEmpty) 'phase': phase,
+        if (round > 0) 'round': round,
+        if (pluginId != null) 'pluginId': pluginId,
+        if (pluginName != null) 'pluginName': pluginName,
+        if (toolName != null) 'toolName': toolName,
+        if (status.isNotEmpty) 'status': status,
+        if (arguments != null) 'arguments': arguments,
+        if (resultSummary != null) 'resultSummary': resultSummary,
+      };
+
+  factory ReasoningStep.fromMap(Map<String, dynamic> m) => ReasoningStep._(
+        kind: m['kind'] as String,
+        content: m['content'] as String,
+        resultCount: m['resultCount'] as int?,
+        latencyMs: m['latencyMs'] as int?,
+        ts: DateTime.parse(m['ts'] as String),
+        phase: (m['phase'] as String?) ?? '',
+        round: (m['round'] as int?) ?? 0,
+        pluginId: m['pluginId'] as String?,
+        pluginName: m['pluginName'] as String?,
+        toolName: m['toolName'] as String?,
+        status: (m['status'] as String?) ?? '',
+        arguments: m['arguments'] as String?,
+        resultSummary: m['resultSummary'] as String?,
+      );
+}
+
+/// v1.7.26 (E3)：重试版本快照（v1.7.22 原为 UI 层内存结构，现下沉到 models
+/// 供 StorageService 持久化到 message_versions 表——此前仅存活于进程内存，
+/// 重启后版本切换功能丢失）
+class RetryVersion {
+  final String content;
+  final List<ReasoningStep> reasoningSteps;
+  final int? promptTokens;
+  final int? completionTokens;
+  final int? totalTokens;
+  final int injectedWebSearchCount;
+  final bool showStaleFootnote;
+  final String modelName;
+  RetryVersion({
+    required this.content,
+    this.reasoningSteps = const [],
+    this.promptTokens,
+    this.completionTokens,
+    this.totalTokens,
+    this.injectedWebSearchCount = 0,
+    this.showStaleFootnote = false,
+    this.modelName = '',
+  });
 }
 
 /// v1.3.6：📎 附件类型
@@ -118,7 +209,10 @@ class ChatMessage {
   final String conversationId;
   final MessageRole role;
   String content;
-  final DateTime createdAt;
+  /// v1.7.26 (E4)：改为可变——历史消息重试后需写回旧对话原有的时间戳做原位
+  /// 重插，DB 依赖 createdAt ASC 排序，若沿用新时间则重载后顺序会被打乱
+  DateTime createdAt;
+  String? modelName;
 
   // ===== UI 标记（不落库 / 不参与序列化，纯用于本次会话内气泡展示）=====
   /// true → 在气泡底部加一行"⚠️ 基于 AI 内置知识，可能已过时"的淡色 footnote
@@ -128,13 +222,31 @@ class ChatMessage {
   /// v1.3.1 build 11: ReAct 思考过程（每一步 thinking/search/结果）
   final List<ReasoningStep> reasoningSteps = [];
   /// true → ReAct 循环已经跑过（决定 UI 上显示折叠面板）
-  bool get hasReasoning => reasoningSteps.isNotEmpty;
+  bool get hasReasoning {
+    // v1.7.25：只认"有真实内容"的思考——纯进度占位（🧠 思考中…/📦/📩）不算，
+    // 单步骤流程（如纯下载）不展示无意义的思考面板；多步骤/真实思考/搜索结果才显示。
+    if (reasoningSteps.isEmpty) return false;
+    for (final s in reasoningSteps) {
+      if (s.kind != 'thinking') return true; // search/search_result/工具结果
+      final c = s.content.trim();
+      if (c.isEmpty) continue;
+      if (c.contains('思考中') || c.contains('Thinking') ||
+          c.contains('thinking') || c.contains('📦') ||
+          c.contains('📩') || c.contains('🧠')) {
+        continue; // 纯进度占位
+      }
+      return true; // 有真实思考文本
+    }
+    return false;
+  }
   /// v1.3.6：token 用量统计（prompt + completion + total）
   int? promptTokens;
   int? completionTokens;
   int? totalTokens;
   /// v1.3.6：📎 附件列表（落库为 JSON 字符串）
   final List<MessageAttachment> attachments = [];
+  String retryOf = '';
+  int retryIndex = 0;
 
   ChatMessage({
     required this.id,
@@ -142,14 +254,18 @@ class ChatMessage {
     required this.role,
     required this.content,
     required this.createdAt,
+    this.modelName,
     this.showStaleFootnote = false,
     this.injectedWebSearchCount = 0,
+    this.retryOf = '',
+    this.retryIndex = 0,
   });
 
   factory ChatMessage.create({
     required String conversationId,
     required MessageRole role,
     required String content,
+    String? modelName,
     bool showStaleFootnote = false,
     int injectedWebSearchCount = 0,
   }) {
@@ -159,6 +275,7 @@ class ChatMessage {
       role: role,
       content: content,
       createdAt: DateTime.now(),
+      modelName: modelName,
       showStaleFootnote: showStaleFootnote,
       injectedWebSearchCount: injectedWebSearchCount,
     );
@@ -175,6 +292,13 @@ class ChatMessage {
       reasoningSteps.last.content += chunk;
     }
   }
+  /// v1.7.25：每轮思考强制新建独立 step。
+  /// 修复：连续多轮 thinking（无 search 打断）时 appendLastThinking 会合并到
+  /// 同一个 step，且 setLastReasoningPhase 把 phase 覆盖成最新轮次 → 第一轮
+  /// 内容在最后"突然切换/消失"。每轮开始调用本方法即可按轮次分隔。
+  void startNewThinking(String chunk) {
+    reasoningSteps.add(ReasoningStep('thinking', chunk));
+  }
   void markLastSearchResult({required int count, int? latencyMs, required String summary}) {
     reasoningSteps.add(ReasoningStep(
       'search_result',
@@ -184,6 +308,18 @@ class ChatMessage {
     ));
   }
 
+  void setLastReasoningPhase(String phase, int round) {
+    if (reasoningSteps.isEmpty) return;
+    final last = reasoningSteps.last;
+    reasoningSteps[reasoningSteps.length - 1] = ReasoningStep(
+      last.kind, last.content,
+      resultCount: last.resultCount,
+      latencyMs: last.latencyMs,
+      phase: phase,
+      round: round,
+    );
+  }
+
   Map<String, dynamic> toMap() {
     return {
       'id': id,
@@ -191,9 +327,18 @@ class ChatMessage {
       'role': role.value,
       'content': content,
       'createdAt': createdAt.toIso8601String(),
+      'modelName': modelName,
       // v1.3.6：附件序列化为 JSON 数组字符串
       'attachments': json
           .encode(attachments.map((a) => a.toMap()).toList()),
+      'retryOf': retryOf,
+      'retryIndex': retryIndex,
+      'reasoningSteps': json.encode(
+          reasoningSteps.map((s) => s.toMap()).toList()),
+      // v1.7.26 (C2)：token 用量持久化（此前仅内存，重启后丢失）
+      if (promptTokens != null) 'promptTokens': promptTokens,
+      if (completionTokens != null) 'completionTokens': completionTokens,
+      if (totalTokens != null) 'totalTokens': totalTokens,
     };
   }
 
@@ -204,6 +349,9 @@ class ChatMessage {
       role: MessageRoleExtension.fromString(map['role'] as String),
       content: map['content'] as String,
       createdAt: DateTime.parse(map['createdAt'] as String),
+      modelName: map['modelName'] as String?,
+      retryOf: (map['retryOf'] as String?) ?? '',
+      retryIndex: (map['retryIndex'] as int?) ?? 0,
     );
     // v1.3.6：反序列化附件（旧消息无此列 → 空）
     final raw = map['attachments'] as String?;
@@ -218,6 +366,21 @@ class ChatMessage {
         // 容错：损坏的 JSON 当作无附件
       }
     }
+    // 反序列化思考步骤
+    final reasoningRaw = map['reasoningSteps'] as String?;
+    if (reasoningRaw != null && reasoningRaw.isNotEmpty && reasoningRaw != '[]') {
+      try {
+        final list = json.decode(reasoningRaw) as List;
+        for (final item in list) {
+          msg.reasoningSteps
+              .add(ReasoningStep.fromMap(item as Map<String, dynamic>));
+        }
+      } catch (_) {}
+    }
+    // v1.7.26 (C2)：token 用量反序列化（旧库无此列 → null）
+    msg.promptTokens = map['promptTokens'] as int?;
+    msg.completionTokens = map['completionTokens'] as int?;
+    msg.totalTokens = map['totalTokens'] as int?;
     return msg;
   }
 

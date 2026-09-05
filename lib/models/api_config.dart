@@ -11,15 +11,10 @@ class ApiConfig {
   double temperature;
   double topP;
   int maxTokens;
+  String templateId;
 
-  /// v1.5.0：缓存从 `GET {baseUrl}/v1/models` 拉取的模型 id 列表（JSON 字符串）
-  ///
-  /// 数据库存储为 TEXT（JSON 序列化的 List<String>）；为空字符串或 null 表示未缓存。
-  /// UI 上展示时用 `cachedModelsList` getter 解码。
-  ///
-  /// 失败兜底：listModels 调用失败时保留旧 cachedModels 不覆盖，
-  /// UI 提示「拉取失败，已用上次缓存的列表」。
   String cachedModels;
+  bool supportVision;
 
   ApiConfig({
     required this.id,
@@ -31,7 +26,9 @@ class ApiConfig {
     this.temperature = 0.7,
     this.topP = 1.0,
     this.maxTokens = 2048,
+    this.templateId = 'custom',
     this.cachedModels = '',
+    this.supportVision = true,
   });
 
   factory ApiConfig.create({
@@ -74,7 +71,9 @@ class ApiConfig {
       'temperature': temperature,
       'topP': topP,
       'maxTokens': maxTokens,
+      'templateId': templateId,
       'cachedModels': cachedModels,
+      'supportVision': supportVision ? 1 : 0,
     };
   }
 
@@ -89,7 +88,10 @@ class ApiConfig {
       temperature: (map['temperature'] as num?)?.toDouble() ?? 0.7,
       topP: (map['topP'] as num?)?.toDouble() ?? 1.0,
       maxTokens: (map['maxTokens'] as int?) ?? 2048,
+      templateId: (map['templateId'] as String?) ?? 'custom',
       cachedModels: (map['cachedModels'] as String?) ?? '',
+      supportVision:
+          map['supportVision'] == null || (map['supportVision'] as int?) == 1,
     );
   }
 
@@ -107,7 +109,9 @@ class ApiConfig {
     double? temperature,
     double? topP,
     int? maxTokens,
+    String? templateId,
     String? cachedModels,
+    bool? supportVision,
   }) {
     return ApiConfig(
       id: id,
@@ -119,7 +123,9 @@ class ApiConfig {
       temperature: temperature ?? this.temperature,
       topP: topP ?? this.topP,
       maxTokens: maxTokens ?? this.maxTokens,
+      templateId: templateId ?? this.templateId,
       cachedModels: cachedModels ?? this.cachedModels,
+      supportVision: supportVision ?? this.supportVision,
     );
   }
 

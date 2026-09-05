@@ -40,7 +40,9 @@ class GhApkAsset {
     if (n.contains('arm64-v8a') || n.contains('arm64')) return 'arm64-v8a';
     if (n.contains('armeabi-v7a') ||
         n.contains('armeabi') ||
-        n.contains('armv7')) return 'armeabi-v7a';
+        n.contains('armv7')) {
+      return 'armeabi-v7a';
+    }
     if (n.contains('x86_64')) return 'x86_64';
     if (n.contains('x86') || n.contains('i386') || n.contains('i686')) {
       return 'x86';

@@ -495,7 +495,7 @@ class SelfCheckService {
         content: '测试附件',
       );
       msg.attachments.addAll([
-        MessageAttachment(
+        const MessageAttachment(
           id: 'att_1',
           type: AttachmentType.image,
           fileName: 'photo.jpg',
@@ -503,7 +503,7 @@ class SelfCheckService {
           mimeType: 'image/jpeg',
           sizeBytes: 102400,
         ),
-        MessageAttachment(
+        const MessageAttachment(
           id: 'att_2',
           type: AttachmentType.doc,
           fileName: 'report.pdf',

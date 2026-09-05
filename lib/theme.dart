@@ -5,32 +5,32 @@ class AppTheme {
   static const _seed = Color(0xFF006874);
 
   static ThemeData get darkTheme {
-    final scheme = ColorScheme.dark(
-      primary: const Color(0xFF4FD8EB),
-      onPrimary: const Color(0xFF003840),
-      primaryContainer: const Color(0xFF004F59),
-      onPrimaryContainer: const Color(0xFF7FF4FF),
-      secondary: const Color(0xFFBCCDDB),
-      onSecondary: const Color(0xFF1A333E),
-      secondaryContainer: const Color(0xFF334B57),
-      onSecondaryContainer: const Color(0xFFD8E9F4),
-      tertiary: const Color(0xFFC8D6F4),
-      onTertiary: const Color(0xFF1A2F55),
-      tertiaryContainer: const Color(0xFF334672),
-      onTertiaryContainer: const Color(0xFFDCE1FF),
-      error: const Color(0xFFF2B8B5),
-      onError: const Color(0xFF601410),
-      errorContainer: const Color(0xFF8C1D18),
-      onErrorContainer: const Color(0xFFF9DEDC),
-      surface: const Color(0xFF0F1316),
-      onSurface: const Color(0xFFDDE3E8),
-      onSurfaceVariant: const Color(0xFFBFC5CB),
-      surfaceContainerHighest: const Color(0xFF333B3F),
-      surfaceContainerHigh: const Color(0xFF283034),
-      surfaceContainer: const Color(0xFF1F272B),
-      surfaceContainerLow: const Color(0xFF171E22),
-      outline: const Color(0xFF8D9499),
-      outlineVariant: const Color(0xFF434A4E),
+    const scheme = ColorScheme.dark(
+      primary: Color(0xFF4FD8EB),
+      onPrimary: Color(0xFF003840),
+      primaryContainer: Color(0xFF004F59),
+      onPrimaryContainer: Color(0xFF7FF4FF),
+      secondary: Color(0xFFBCCDDB),
+      onSecondary: Color(0xFF1A333E),
+      secondaryContainer: Color(0xFF334B57),
+      onSecondaryContainer: Color(0xFFD8E9F4),
+      tertiary: Color(0xFFC8D6F4),
+      onTertiary: Color(0xFF1A2F55),
+      tertiaryContainer: Color(0xFF334672),
+      onTertiaryContainer: Color(0xFFDCE1FF),
+      error: Color(0xFFF2B8B5),
+      onError: Color(0xFF601410),
+      errorContainer: Color(0xFF8C1D18),
+      onErrorContainer: Color(0xFFF9DEDC),
+      surface: Color(0xFF0F1316),
+      onSurface: Color(0xFFDDE3E8),
+      onSurfaceVariant: Color(0xFFBFC5CB),
+      surfaceContainerHighest: Color(0xFF333B3F),
+      surfaceContainerHigh: Color(0xFF283034),
+      surfaceContainer: Color(0xFF1F272B),
+      surfaceContainerLow: Color(0xFF171E22),
+      outline: Color(0xFF8D9499),
+      outlineVariant: Color(0xFF434A4E),
       brightness: Brightness.dark,
     );
     return ThemeData(
@@ -117,18 +117,42 @@ class AppTheme {
   }
 
   static ThemeData get lightTheme {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: _seed,
-      brightness: Brightness.light,
+    const scheme = ColorScheme.light(
+      primary: _seed,
+      onPrimary: Colors.white,
+      primaryContainer: Color(0xFF97F0FF),
+      onPrimaryContainer: Color(0xFF001F24),
+      secondary: Color(0xFF4A6267),
+      onSecondary: Colors.white,
+      secondaryContainer: Color(0xFFCDE7EC),
+      onSecondaryContainer: Color(0xFF051F23),
+      tertiary: Color(0xFF525E7D),
+      onTertiary: Colors.white,
+      tertiaryContainer: Color(0xFFDAE2FF),
+      onTertiaryContainer: Color(0xFF0E1B37),
+      error: Color(0xFFBA1A1A),
+      onError: Colors.white,
+      errorContainer: Color(0xFFFFDAD6),
+      onErrorContainer: Color(0xFF410002),
+      surface: Color(0xFFFAFDFD),
+      onSurface: Color(0xFF191C1D),
+      onSurfaceVariant: Color(0xFF3F484A),
+      surfaceContainerHighest: Color(0xFFDDE4E6),
+      surfaceContainerHigh: Color(0xFFE7EBED),
+      surfaceContainer: Color(0xFFEEF2F3),
+      surfaceContainerLow: Color(0xFFF4F7F8),
+      outline: Color(0xFF6F797B),
+      outlineVariant: Color(0xFFBFC8CA),
     );
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
+      scaffoldBackgroundColor: scheme.surface,
       appBarTheme: AppBarTheme(
         centerTitle: true,
         elevation: 0,
         scrolledUnderElevation: 2,
-        backgroundColor: scheme.surface,
+        backgroundColor: scheme.surfaceContainer,
         foregroundColor: scheme.onSurface,
       ),
       cardTheme: CardThemeData(
@@ -137,18 +161,62 @@ class AppTheme {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
       dialogTheme: DialogThemeData(
-        backgroundColor: scheme.surface,
+        backgroundColor: scheme.surfaceContainerHigh,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        surfaceTintColor: Colors.transparent,
       ),
       bottomSheetTheme: BottomSheetThemeData(
-        backgroundColor: scheme.surface,
+        backgroundColor: scheme.surfaceContainerHigh,
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(
-        border: OutlineInputBorder(),
-        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+        filled: true,
+        fillColor: scheme.surfaceContainer,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: scheme.outlineVariant),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: scheme.outlineVariant),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: scheme.primary, width: 2),
+        ),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: scheme.primary,
+          foregroundColor: scheme.onPrimary,
+          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          foregroundColor: scheme.primary,
+          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+      textTheme: TextTheme(
+        bodyLarge: TextStyle(color: scheme.onSurface),
+        bodyMedium: TextStyle(color: scheme.onSurface),
+        bodySmall: TextStyle(color: scheme.onSurfaceVariant),
+        titleLarge: TextStyle(
+            color: scheme.onSurface, fontWeight: FontWeight.bold),
+        titleMedium: TextStyle(
+            color: scheme.onSurface, fontWeight: FontWeight.w600),
+        titleSmall: TextStyle(
+            color: scheme.onSurface, fontWeight: FontWeight.w600),
+        headlineSmall: TextStyle(
+            color: scheme.onSurface, fontWeight: FontWeight.bold),
       ),
       textSelectionTheme: TextSelectionThemeData(
         cursorColor: scheme.primary,

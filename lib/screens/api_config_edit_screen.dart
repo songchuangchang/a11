@@ -1,13 +1,14 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../l10n/app_localizations.dart';
 import '../models/api_config.dart';
 import '../models/api_provider_template.dart';
 import '../services/storage_service.dart';
 import '../services/api_service.dart';
 import '../services/logger_service.dart';
+import '../utils/launcher_utils.dart';
+import '../widgets/vendor_avatar.dart';
 
 class ApiConfigEditScreen extends StatefulWidget {
   final ApiConfig? config;
@@ -27,6 +28,8 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
   late TextEditingController _systemPromptController;
   late double _temperature;
   late int _maxTokens;
+  // v1.7.33：视觉支持开关（关闭时图片附件走本机 OCR 降级，不发给模型）
+  late bool _supportVision;
   bool _isTesting = false;
   String _testResult = '';
   bool _testSuccess = false;
@@ -39,7 +42,6 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
   String _refreshModelsMsg = '';
   List<String> _cachedModels = const [];
   String? _lastRefreshedAt;
-
   /// v1.5.3：按 baseUrl 缓存模型列表，切模板时恢复对应服务商的模型，
   /// 不串台（DeepSeek 模型不会串到阿里云）、不丢失（切回 DeepSeek 还在）。
   /// key = baseUrl，value = 该服务商拉取到的模型 id 列表。
@@ -61,6 +63,7 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
     _systemPromptController = TextEditingController(text: c.systemPrompt);
     _temperature = c.temperature;
     _maxTokens = c.maxTokens;
+    _supportVision = c.supportVision;
     // v1.5.0：从 ApiConfig 加载已缓存的模型列表（用户上次拉的）
     _cachedModels = c.cachedModelsList;
     // v1.5.3：把当前配置的 cachedModels 按 baseUrl 存入缓存 Map（编辑已有配置时）
@@ -71,8 +74,14 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
     if (c.apiKey.isNotEmpty && c.baseUrl.trim().isNotEmpty) {
       _apiKeysByUrl[c.baseUrl.trim()] = c.apiKey;
     }
-    // 如果是编辑现有配置，看看能不能反向匹配到模板
-    _guessTemplateFromExisting();
+    // 如果已保存了 templateId，直接使用（v1.7.22+）；旧数据（templateId='custom'）则尝试反向匹配
+    _selectedTemplateId = c.templateId;
+    if (_selectedTemplateId == ApiProviderTemplate.customId) {
+      _guessTemplateFromExisting();
+    }
+    // v1.7.32：模型列表只允许用户点击“在线刷新”获取，避免输入过程中反复请求。
+    // 成功列表会随配置保存，之后作为离线可用缓存展示。
+
   }
 
   /// v1.5.0：调 ApiService.listModels 拉取真实可用模型列表
@@ -85,7 +94,20 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
   Future<void> _refreshModels() async {
     final isZh =
         AppLocalizations.of(context).locale.languageCode == 'zh';
-    final baseUrl = _baseUrlController.text.trim();
+    var baseUrl = _baseUrlController.text.trim();
+    if (baseUrl.isEmpty && _selectedTemplateId != ApiProviderTemplate.customId) {
+      // v1.7.36：已选模板但 Base URL 为空 → 自动回填模板地址，无需用户先填
+      final t = ApiProviderTemplateCatalog.instance.all
+          .where((e) => e.id == _selectedTemplateId)
+          .firstOrNull;
+      if (t != null && t.baseUrl.isNotEmpty) {
+        baseUrl = t.baseUrl;
+        _baseUrlController.text = baseUrl;
+        if (_nameController.text.trim().isEmpty) {
+          _nameController.text = t.defaultConfigName;
+        }
+      }
+    }
     if (baseUrl.isEmpty) {
       setState(() => _refreshModelsMsg =
           isZh ? '⚠️ 请先填 Base URL' : '⚠️ Fill Base URL first');
@@ -144,13 +166,26 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
         final errStr = e.toString();
         // v1.5.3：401 给明确提示（通常是 Key 没填/无效，不是 URL 问题）
         if (errStr.contains('401')) {
-          _refreshModelsMsg = _cachedModels.isEmpty
-              ? (isZh
-                  ? '❌ 拉取失败：401 未授权，请先填写正确的 API Key'
-                  : '❌ Failed: 401 unauthorized. Check your API key')
-              : (isZh
-                  ? '⚠️ 401 未授权（请检查 API Key），已用上次缓存的 ${_cachedModels.length} 个模型'
-                  : '⚠️ 401 unauthorized (check API key), using ${_cachedModels.length} cached models');
+          // v1.7.36：401 且模板有预置模型时，自动回退内置列表（像 Chatbox 一样
+          // 不填 Key 也能直接选模型，不再卡死在报错上）
+          final t = ApiProviderTemplateCatalog.instance.all
+              .where((e) => e.id == _selectedTemplateId)
+              .firstOrNull;
+          if (_cachedModels.isEmpty && t != null && t.models.isNotEmpty) {
+            _cachedModels = t.models.map((m) => m.id).toList();
+            _modelsByUrl[baseUrl] = _cachedModels;
+            _refreshModelsMsg = isZh
+                ? '💡 在线列表需要 API Key；已加载内置模型（${_cachedModels.length} 个），可直接在下方选择'
+                : '💡 Online list needs API key; loaded ${_cachedModels.length} built-in models below';
+          } else if (_cachedModels.isEmpty) {
+            _refreshModelsMsg = isZh
+                ? '❌ 拉取失败：401 未授权，请先填写正确的 API Key'
+                : '❌ Failed: 401 unauthorized. Check your API key';
+          } else {
+            _refreshModelsMsg = isZh
+                ? '⚠️ 401 未授权（请检查 API Key），已用上次缓存的 ${_cachedModels.length} 个模型'
+                : '⚠️ 401 unauthorized (check API key), using ${_cachedModels.length} cached models';
+          }
         } else {
           _refreshModelsMsg = _cachedModels.isEmpty
               ? (isZh ? '❌ 拉取失败：$e' : '❌ Failed: $e')
@@ -166,7 +201,7 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
   void _guessTemplateFromExisting() {
     final url = _baseUrlController.text.trim();
     if (url.isEmpty) return;
-    for (final t in ApiProviderTemplate.all) {
+    for (final t in ApiProviderTemplateCatalog.instance.all) {
       if (url.contains(t.baseUrl.replaceAll('https://', '').replaceAll('http://', '').split('/').first) ||
           t.baseUrl.contains(url.replaceAll('https://', '').replaceAll('http://', '').split('/').first)) {
         _selectedTemplateId = t.id;
@@ -195,6 +230,8 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
       systemPrompt: _systemPromptController.text.trim(),
       temperature: _temperature,
       maxTokens: _maxTokens,
+      supportVision: _supportVision,
+      templateId: _selectedTemplateId,
       cachedModels: cachedJson,
     );
     logger.info('Saving API config: name="${config.name}" model="${config.model}" baseUrl="${config.baseUrl}" cachedModels=${_cachedModels.length}项', tag: 'ApiConfig');
@@ -365,7 +402,7 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
                 hintText: 'sk-...',
                 border: const OutlineInputBorder(),
                 suffixIcon: _selectedTemplateId != ApiProviderTemplate.customId
-                    ? const Icon(Icons.check_circle, color: Colors.green, size: 20)
+                    ? Icon(Icons.check_circle, color: Theme.of(context).colorScheme.primary, size: 20)
                     : null,
               ),
               obscureText: true,
@@ -379,82 +416,8 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
               },
             ),
             const SizedBox(height: 16),
-            // v1.5.0：模型输入框 + 「🔄 刷新模型列表」按钮 + 下拉选择
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: TextFormField(
-                    controller: _modelController,
-                    decoration: InputDecoration(
-                      labelText: l.tr('model'),
-                      hintText: 'gpt-4o-mini',
-                      helperText: _selectedTemplateId != ApiProviderTemplate.customId
-                          ? (isZh ? '已通过上方切换器填好，可手动覆盖' : 'Auto-filled by selector above; editable')
-                          : null,
-                      border: const OutlineInputBorder(),
-                    ),
-                    validator: (v) => (v == null || v.isEmpty) ? '*' : null,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // 「🔄 刷新模型列表」按钮（参考 Chatbox 的 listModels）
-                FilledButton.tonalIcon(
-                  onPressed: _isRefreshingModels ? null : _refreshModels,
-                  icon: _isRefreshingModels
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.refresh),
-                  label: const Text('🔄'),
-                ),
-              ],
-            ),
-            // 刷新结果提示
-            if (_refreshModelsMsg.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                _refreshModelsMsg,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: _refreshModelsMsg.startsWith('✅')
-                      ? Colors.green
-                      : (_refreshModelsMsg.startsWith('⚠️') || _refreshModelsMsg.startsWith('❌')
-                          ? Colors.orange
-                          : Theme.of(context).colorScheme.onSurfaceVariant),
-                ),
-              ),
-            ],
-            // v1.5.1：动态拉取的模型已合并到上方「选择模型版本」的 ☁️ 在线分组里，
-            // 不再重复显示下拉框。如果该模板没有预设模型（custom），这里兜底显示。
-            if (_cachedModels.isNotEmpty &&
-                _selectedTemplateId == ApiProviderTemplate.customId) ...[
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                value: _cachedModels.contains(_modelController.text.trim())
-                    ? _modelController.text.trim()
-                    : null,
-                decoration: InputDecoration(
-                  labelText: isZh ? '已缓存模型（点击切换）' : 'Cached models (tap to switch)',
-                  border: const OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: _cachedModels.map((id) => DropdownMenuItem(
-                  value: id,
-                  child: Text(id, style: const TextStyle(fontSize: 13)),
-                )).toList(),
-                onChanged: (v) {
-                  if (v != null) {
-                    setState(() {
-                      _modelController.text = v;
-                      _selectedModelId = v;
-                    });
-                  }
-                },
-              ),
-            ],
+            // v1.7.18（需求3）：模型输入/刷新/缓存下拉抽独立方法降 CC
+            ..._buildModelInputSection(isZh, l),
             const SizedBox(height: 16),
             TextFormField(
               controller: _systemPromptController,
@@ -466,15 +429,20 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
               maxLines: 3,
             ),
             const SizedBox(height: 16),
-            Text('${l.tr('temperature')}: ${_temperature.toStringAsFixed(1)}',
-                style: Theme.of(context).textTheme.bodyMedium),
-            Slider(
-              value: _temperature,
-              min: 0.0,
-              max: 2.0,
-              divisions: 20,
-              onChanged: (v) => setState(() => _temperature = v),
+            // v1.7.33：视觉支持开关——关闭后图片附件不发给模型，改用本机 OCR 把文字注入上下文
+            SwitchListTile(
+              title: Text(isZh ? '视觉支持（图片理解）' : 'Vision support (image understanding)'),
+              subtitle: Text(
+                isZh
+                    ? '关闭后，图片附件改为在本机用 OCR 识别文字并注入上下文；适合不支持图片的文本模型'
+                    : 'When off, images are OCR-ed locally into text instead of being sent to the model; good for text-only models',
+                style: const TextStyle(fontSize: 11),
+              ),
+              dense: true,
+              value: _supportVision,
+              onChanged: (v) => setState(() => _supportVision = v),
             ),
+            // v1.7.25：温度改为每对话自定义（对话设置面板可调），API 配置不再暴露温度
             const SizedBox(height: 8),
             Text('${l.tr('maxTokens')}: $_maxTokens',
                 style: Theme.of(context).textTheme.bodyMedium),
@@ -486,35 +454,8 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
               onChanged: (v) => setState(() => _maxTokens = v.round()),
             ),
             const SizedBox(height: 24),
-            FilledButton.tonalIcon(
-              onPressed: _isTesting ? null : _testConnection,
-              icon: _isTesting
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.wifi_tethering),
-              label: Text(l.tr('testConnection')),
-            ),
-            if (_testResult.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: _testSuccess
-                      ? Colors.green.withValues(alpha: 0.1)
-                      : Colors.red.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  _testResult,
-                  style: TextStyle(
-                    color: _testSuccess ? Colors.green : Colors.red,
-                  ),
-                ),
-              ),
-            ],
+            // v1.7.18（需求3）：测试连接按钮 + 结果抽独立方法降 CC
+            ..._buildTestSection(l),
             const SizedBox(height: 24),
             FilledButton.icon(
               onPressed: _save,
@@ -527,9 +468,133 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
     );
   }
 
+  // ---------- v1.7.18（需求3）：build 子段（降 CC）----------
+
+  /// 模型输入框 + 刷新按钮 + 刷新结果提示 + 缓存下拉（custom 兜底）
+  List<Widget> _buildModelInputSection(bool isZh, AppLocalizations l) {
+    return [
+      // v1.5.0：模型输入框 + 「🔄 刷新模型列表」按钮
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: TextFormField(
+              controller: _modelController,
+              decoration: InputDecoration(
+                labelText: l.tr('model'),
+                hintText: 'gpt-4o-mini',
+                helperText: _selectedTemplateId != ApiProviderTemplate.customId
+                    ? (isZh
+                        ? '已通过上方切换器填好，可手动覆盖'
+                        : 'Auto-filled by selector above; editable')
+                    : null,
+                border: const OutlineInputBorder(),
+              ),
+              validator: (v) => (v == null || v.isEmpty) ? '*' : null,
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.tonalIcon(
+            onPressed: _isRefreshingModels ? null : _refreshModels,
+            icon: _isRefreshingModels
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh),
+            label: Text(isZh ? '在线刷新' : 'Refresh Online'),
+          ),
+        ],
+      ),
+      if (_refreshModelsMsg.isNotEmpty) ...[
+        const SizedBox(height: 6),
+        Text(
+          _refreshModelsMsg,
+          style: TextStyle(
+            fontSize: 12,
+            color: _refreshModelsMsg.startsWith('✅')
+                ? Theme.of(context).colorScheme.primary
+                : (_refreshModelsMsg.startsWith('⚠️') ||
+                        _refreshModelsMsg.startsWith('❌')
+                    ? Theme.of(context).colorScheme.error
+                    : Theme.of(context).colorScheme.onSurfaceVariant),
+          ),
+        ),
+      ],
+      // v1.5.1：custom 模板兜底显示缓存模型下拉
+      if (_cachedModels.isNotEmpty &&
+          _selectedTemplateId == ApiProviderTemplate.customId) ...[
+        const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          initialValue: _cachedModels.contains(_modelController.text.trim())
+              ? _modelController.text.trim()
+              : null,
+          decoration: InputDecoration(
+            labelText:
+                isZh ? '已缓存模型（点击切换）' : 'Cached models (tap to switch)',
+            border: const OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: _cachedModels
+              .map((id) => DropdownMenuItem(
+                    value: id,
+                    child: Text(id, style: const TextStyle(fontSize: 13)),
+                  ))
+              .toList(),
+          onChanged: (v) {
+            if (v != null) {
+              setState(() {
+                _modelController.text = v;
+                _selectedModelId = v;
+              });
+            }
+          },
+        ),
+      ],
+    ];
+  }
+
+  /// 测试连接按钮 + 结果提示框
+  List<Widget> _buildTestSection(AppLocalizations l) {
+    return [
+      FilledButton.tonalIcon(
+        onPressed: _isTesting ? null : _testConnection,
+        icon: _isTesting
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.wifi_tethering),
+        label: Text(l.tr('testConnection')),
+      ),
+      if (_testResult.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: _testSuccess
+                ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.1)
+                : Theme.of(context).colorScheme.error.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            _testResult,
+            style: TextStyle(
+              color: _testSuccess
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.error,
+            ),
+          ),
+        ),
+      ],
+    ];
+  }
+
   // ---------- 模型版本切换器 ----------
   Widget _buildModelVersionSelector(bool isZh) {
-    final t = ApiProviderTemplate.all
+    final t = ApiProviderTemplateCatalog.instance.all
         .firstWhere((e) => e.id == _selectedTemplateId);
     if (t.models.isEmpty) {
       // 没有多个版本（比如 LM Studio），就只显示一个"单一模型"提示
@@ -603,15 +668,18 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 4, vertical: 1),
                         decoration: BoxDecoration(
-                          color: Colors.greenAccent.shade100,
+                          color: Theme.of(context).colorScheme.primaryContainer,
                           borderRadius: BorderRadius.circular(4),
-                          border:
-                              Border.all(color: Colors.green.withAlpha(120)),
+                          border: Border.all(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .primary
+                                  .withValues(alpha: 0.47)),
                         ),
                         child: Text(
                           isZh ? '免费' : 'FREE',
-                          style: const TextStyle(
-                            color: Colors.green,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.primary,
                             fontSize: 10,
                             fontWeight: FontWeight.bold,
                           ),
@@ -639,9 +707,9 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
           const SizedBox(height: 10),
           _buildSectionLabel(
               isZh
-                  ? '☁️ 在线拉取（点右侧🔄按钮刷新）'
-                  : '☁️ Online (tap 🔄 to refresh)',
-              Colors.blue.shade700),
+                  ? '已缓存（离线可用）'
+                  : 'Cached (available offline)',
+              Theme.of(context).colorScheme.primary),
           const SizedBox(height: 6),
           Wrap(
             spacing: 8,
@@ -653,7 +721,7 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
                 selected: selected,
                 showCheckmark: false,
                 avatar: Icon(Icons.cloud_outlined,
-                    size: 14, color: Colors.blue.shade700),
+                    size: 14, color: Theme.of(context).colorScheme.primary),
                 onSelected: (_) {
                   setState(() {
                     _selectedModelId = id;
@@ -701,7 +769,7 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
     ];
     final List<Widget> out = [];
     for (final (g, title) in groups) {
-      final templates = ApiProviderTemplate.byGroup(g);
+      final templates = ApiProviderTemplateCatalog.instance.byGroup(g);
       final displayTitle =
           isZh ? title.split(' / ').first.trim() : title.split(' / ').last.trim();
       out.add(Padding(
@@ -742,13 +810,7 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
       onSelected: (_) {
         _applyTemplate(t);
       },
-      avatar: Container(
-        width: 24,
-        height: 24,
-        decoration: BoxDecoration(
-            color: t.color, borderRadius: BorderRadius.circular(8)),
-        child: Icon(t.icon, size: 14, color: Colors.white),
-      ),
+      avatar: VendorAvatar(templateId: t.id, size: 16),
       label: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -768,14 +830,18 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                 decoration: BoxDecoration(
-                  color: Colors.greenAccent.shade100,
+                  color: Theme.of(context).colorScheme.primaryContainer,
                   borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: Colors.green.withAlpha(120)),
+                  border: Border.all(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withValues(alpha: 0.47)),
                 ),
                 child: Text(
                   isZh ? '部分免费' : 'PARTIAL FREE',
-                  style: const TextStyle(
-                      color: Colors.green,
+                  style: TextStyle(
+                      color: Theme.of(context).colorScheme.primary,
                       fontSize: 10,
                       fontWeight: FontWeight.bold),
                 ),
@@ -801,7 +867,7 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
   }
 
   Widget _templateInfoHint(bool isZh) {
-    final t = ApiProviderTemplate.all
+    final t = ApiProviderTemplateCatalog.instance.all
         .firstWhere((e) => e.id == _selectedTemplateId);
     final desc = isZh ? t.descZh : t.descEn;
     return Container(
@@ -867,10 +933,8 @@ class _ApiConfigEditScreenState extends State<ApiConfigEditScreen> {
 
   /// v1.5.2：用系统浏览器打开官网链接
   Future<void> _openUrl(String url) async {
-    final uri = Uri.parse(url);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    }
+    // v1.7.18（需求3/4）：改用公共 LauncherUtils.openExternalUrl 去重
+    await LauncherUtils.openExternalUrl(url);
   }
 
   @override

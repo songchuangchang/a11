@@ -23,7 +23,7 @@ class InstalledMcpPlugin extends ReActPlugin {
   }
 
   factory InstalledMcpPlugin.fromMetadata(PluginMetadata metadata) {
-    if (metadata.kind != PluginKind.mcpRemote) {
+    if (!metadata.kind.isRemote) {
       throw const FormatException('Plugin metadata is not an MCP plugin');
     }
     return InstalledMcpPlugin(metadata: metadata);
@@ -53,6 +53,28 @@ class InstalledMcpPlugin extends ReActPlugin {
       Map<String, dynamic> attrs) async {
     if (attrs['pluginId']?.toString() != _meta.id) return;
     final tool = attrs['tool']?.toString().trim() ?? '';
+    final rawArgs = attrs['arguments']?.toString() ?? '{}';
+    final startedAt = Stopwatch()..start();
+    ReasoningStep? activity;
+    void finish({required String status, String? summary, String? text}) {
+      startedAt.stop();
+      pc.updateReasoningStep(
+        activity,
+        latencyMs: startedAt.elapsedMilliseconds,
+        status: status,
+        resultSummary: summary ?? text,
+      );
+    }
+
+    activity = pc.addReasoningStep(
+      'mcp_call',
+      'MCP ${_meta.name} · $tool',
+      pluginId: _meta.id,
+      pluginName: _meta.name,
+      toolName: tool.isEmpty ? null : tool,
+      arguments: rawArgs,
+      status: 'running',
+    );
     // v1.7.9 (M14 修复)：工具名不存在时不再 throw（此前异常被 dispatch 静默吞掉，
     // AI 收不到任何反馈 → 幻觉工具名反复重试耗尽轮次），改为注入错误 toolresult
     if (tool.isEmpty || !tools.any((t) => t['name']?.toString() == tool)) {
@@ -60,15 +82,24 @@ class InstalledMcpPlugin extends ReActPlugin {
         '[MCP] 工具不存在: plugin=${_meta.id}, tool=$tool, available=${tools.map((t) => t['name']).join(',')}',
         tag: 'MCP',
       );
-      pc.addReasoningStep('mcp_call', 'MCP 工具不存在：$tool');
-      pc.addMessage(_toolMessage(pc, tool.isEmpty ? '(empty)' : tool,
-          'MCP tool "$tool" not found. Available tools: ${tools.map((t) => t['name']).join(', ')}. 请改用列表中的工具名。'));
+      final message = 'MCP tool "$tool" not found. Available tools: ${tools.map((t) => t['name']).join(', ')}. 请改用列表中的工具名。';
+      finish(status: 'not_found', text: message);
+      pc.addMessage(_toolMessage(pc, tool.isEmpty ? '(empty)' : tool, message));
       return;
     }
-    final rawArgs = attrs['arguments']?.toString() ?? '{}';
-    final decoded = jsonDecode(rawArgs);
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(rawArgs);
+    } catch (_) {
+      const message = 'MCP arguments must be a JSON object';
+      finish(status: 'invalid', text: message);
+      pc.addMessage(_toolMessage(pc, tool, message));
+      return;
+    }
     if (decoded is! Map) {
-      pc.addMessage(_toolMessage(pc, tool, 'MCP arguments must be a JSON object'));
+      const message = 'MCP arguments must be a JSON object';
+      finish(status: 'invalid', text: message);
+      pc.addMessage(_toolMessage(pc, tool, message));
       return;
     }
 
@@ -76,8 +107,9 @@ class InstalledMcpPlugin extends ReActPlugin {
     if (McpDangerousTools.isDangerous(tool)) {
       final confirmed = await _showDangerousToolConfirmation(context, tool, rawArgs);
       if (!confirmed) {
-        pc.addReasoningStep('mcp_call', '用户拒绝了危险工具调用：$tool');
-        pc.addMessage(_toolMessage(pc, tool, '用户拒绝执行此危险操作'));
+        const message = '用户拒绝执行此危险操作';
+        finish(status: 'rejected', text: message);
+        pc.addMessage(_toolMessage(pc, tool, message));
         return;
       }
     }
@@ -102,7 +134,7 @@ class InstalledMcpPlugin extends ReActPlugin {
         tag: 'MCP',
       );
 
-      pc.addReasoningStep('mcp_call', 'MCP $tool 已返回结果');
+      finish(status: 'success', summary: limited);
       pc.addMessage(_toolMessage(pc, tool, limited));
     } catch (e) {
       // v1.7.2 安全改进：MCP 日志记录
@@ -112,9 +144,9 @@ class InstalledMcpPlugin extends ReActPlugin {
       );
 
       // M-1 修复：工具调用失败要作为可读错误回传给 AI，避免静默无反馈导致反复重试。
-      pc.addReasoningStep('mcp_call', 'MCP $tool 调用失败：$e');
-      pc.addMessage(_toolMessage(
-          pc, tool, 'MCP tool "$tool" failed: ${e.toString()}'));
+      final message = 'MCP tool "$tool" failed: ${e.toString()}';
+      finish(status: 'failed', text: message);
+      pc.addMessage(_toolMessage(pc, tool, message));
     }
   }
 
@@ -122,12 +154,13 @@ class InstalledMcpPlugin extends ReActPlugin {
   Future<bool> _showDangerousToolConfirmation(
       BuildContext context, String tool, String args) async {
     final isZh = Localizations.localeOf(context).languageCode == 'zh';
+    final cs = Theme.of(context).colorScheme;
     final result = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Row(
           children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 28),
+            Icon(Icons.warning_amber_rounded, color: cs.tertiary, size: 28),
             const SizedBox(width: 8),
             Text(isZh ? '危险操作确认' : 'Dangerous Operation'),
           ],
@@ -147,9 +180,9 @@ class InstalledMcpPlugin extends ReActPlugin {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.1),
+                  color: cs.tertiary.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                  border: Border.all(color: cs.tertiary.withValues(alpha: 0.3)),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -164,7 +197,7 @@ class InstalledMcpPlugin extends ReActPlugin {
               Text(
                 McpDangerousTools.getWarning(tool, isZh: isZh),
                 style: TextStyle(
-                  color: Colors.orange[900],
+                  color: cs.tertiary,
                   fontSize: 13,
                 ),
               ),
@@ -186,7 +219,7 @@ class InstalledMcpPlugin extends ReActPlugin {
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(
-              backgroundColor: Colors.orange,
+              backgroundColor: cs.tertiary,
             ),
             child: Text(isZh ? '允许一次' : 'Allow Once'),
           ),

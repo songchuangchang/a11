@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import '../models/chat_message.dart';
+import '../services/builtin_prompt_catalog.dart';
 import '../models/mcp_market_models.dart';
 import '../services/mcp_client_service.dart';
 import '../services/storage_service.dart';
@@ -30,7 +31,11 @@ class PluginRegistry extends ChangeNotifier {
   /// 文件与应用下载插件 id（与 builtin_plugins.dart DownloadPlugin 一致）
   static const String kDownloadPluginId = 'nexus.builtin.download';
 
-  PluginRegistry({StorageService? storage, McpClientService Function()? mcpClientFactory})
+  /// 深度研究插件 id（v1.7.36：可开关，开启后全局生效）
+  static const String kDeepResearchPluginId = 'nexus.builtin.deep_research';
+
+  PluginRegistry(
+      {StorageService? storage, McpClientService Function()? mcpClientFactory})
       : _storage = storage,
         _mcpClientFactory = mcpClientFactory {
     _initFromStorage();
@@ -121,7 +126,9 @@ class PluginRegistry extends ChangeNotifier {
     _registry[id] = plugin;
     _fallbacks[plugin.triggerType] = plugin;
     if (!_enabledMap.containsKey(id)) {
-      _enabledMap[id] = plugin.source == PluginSource.system;
+      // v1.7.36：深度研究插件默认关闭，其余内置插件默认开启
+      _enabledMap[id] =
+          plugin.source == PluginSource.system && id != kDeepResearchPluginId;
     }
     notifyListeners();
   }
@@ -164,7 +171,7 @@ class PluginRegistry extends ChangeNotifier {
     McpClientService? client,
   }) async {
     if (_registry.containsKey(server.name) &&
-        _registry[server.name]!.metadata.kind != PluginKind.mcpRemote) {
+        !_registry[server.name]!.metadata.kind.isRemote) {
       throw const FormatException('A non-MCP plugin already uses this id');
     }
     final mcpClient = client ?? McpClientService();
@@ -281,17 +288,22 @@ class PluginRegistry extends ChangeNotifier {
   }
 
   bool isEnabled(String id) {
+    // v1.7.36：联网搜索内置为默认能力，恒开启不可关
+    if (id == kSearchPluginId) return true;
     return _enabledMap[id] ?? (id == '__fallback_unknown__' ? true : false);
   }
 
   Future<void> setEnabled(String id, bool value) async {
+    // v1.7.36：联网搜索为内置默认能力，拒绝禁用
+    if (id == kSearchPluginId && !value) return;
     // per-id 串行队列：快速连点 A->B 时 B 一定等 A 的 await 持久化完成后再读内存最新值写 DB
     final currentLock = _enableLocks[id];
     final next = Future<void>(() async {
       try {
         if (currentLock != null) await currentLock;
       } catch (_) {}
-      if (value && (_enabledMap[id] ?? false) == false &&
+      if (value &&
+          (_enabledMap[id] ?? false) == false &&
           _registry[id] is InstalledMcpPlugin) {
         await _refreshMcpPlugin(id);
       }
@@ -326,7 +338,8 @@ class PluginRegistry extends ChangeNotifier {
           .toList(growable: false);
       if (tools.isEmpty) throw const FormatException('MCP server has no tools');
       final extra = Map<String, dynamic>.from(current.metadata.extra);
-      extra['tools'] = tools.map((tool) => tool.toJson()).toList(growable: false);
+      extra['tools'] =
+          tools.map((tool) => tool.toJson()).toList(growable: false);
       extra['lastVerifiedAt'] = DateTime.now().toUtc().toIso8601String();
       final metadata = current.metadata.copyWith(extra: extra);
       final replacement = InstalledMcpPlugin.fromMetadata(metadata);
@@ -406,8 +419,58 @@ class PluginRegistry extends ChangeNotifier {
       final target = _registry[pluginId];
       if (target == null ||
           !isEnabled(pluginId) ||
-          (target.metadata.kind != PluginKind.mcpRemote &&
-              target is! InstalledMcpPlugin)) {
+          (!target.metadata.kind.isRemote && target is! InstalledMcpPlugin)) {
+        pluginContext.addReasoningStep(
+          'mcp_call',
+          'MCP 插件不可用',
+          pluginId: pluginId.isEmpty ? null : pluginId,
+          toolName: attrs['tool']?.toString(),
+          arguments: attrs['arguments']?.toString(),
+          status: target == null ? 'not_found' : 'failed',
+          resultSummary: target == null ? '未找到 MCP 插件' : '插件未启用或类型不匹配',
+        );
+        return false;
+      }
+      primary = target;
+    } else if (type == 'skill_call') {
+      // v1.7.12：<skill_call name="skill.xxx"> 按名查找 Skill 插件。
+      // 与 mcp_call 类似：用注册的 pluginId (skill.xxx) 精确匹配，
+      // 找到的插件 handle 会注入 reasoning step 然后继续思考。
+      final skillName = attrs['name']?.toString() ?? '';
+      if (skillName.isEmpty) {
+        pluginContext.addReasoningStep(
+          'skill_call',
+          'Skill 调用无名称',
+          status: 'invalid',
+          resultSummary: '缺少 Skill 名称',
+        );
+        return false;
+      }
+      // 1) 精确匹配 pluginId
+      var target = _registry[skillName];
+      // 2) 退化：按 metadata.name 匹配（有些 SKILL.md 名字带中文，pluginId 是 ASCII 化）
+      if (target == null || !isEnabled(target.metadata.id)) {
+        for (final p in _registry.values) {
+          if (!isEnabled(p.metadata.id)) continue;
+          if (p.metadata.name.toLowerCase() == skillName.toLowerCase() ||
+              p.metadata.id.toLowerCase() == skillName.toLowerCase()) {
+            target = p;
+            break;
+          }
+        }
+      }
+      if (target == null ||
+          !isEnabled(target.metadata.id) ||
+          !target.metadata.kind.isDeclarative) {
+        pluginContext.addReasoningStep(
+          'skill_call',
+          'Skill 不可用',
+          pluginId: skillName,
+          pluginName: skillName,
+          arguments: attrs['arguments']?.toString() ?? attrs['content']?.toString(),
+          status: target == null ? 'not_found' : 'failed',
+          resultSummary: target == null ? '未找到或未启用 Skill' : '插件类型不匹配',
+        );
         return false;
       }
       primary = target;
@@ -434,30 +497,48 @@ class PluginRegistry extends ChangeNotifier {
     }
     if (!isEnabled(primary.metadata.id)) return false;
     try {
-      await primary.handle(context, pluginContext, attrs);
+      await primary.handle(context, pluginContext, {...attrs, 'type': type});
       handled = true;
     } catch (e) {
       // v1.7.1 fix C2: 插件异常不再静默吞掉，注入错误消息让 AI 知道失败
-      if (type == 'mcp_call') return false;
-      final errorMsg = '<toolresult plugin_id="${primary.metadata.id}" tool="$type">插件执行失败: ${e.toString()}</toolresult>';
+      if (type == 'mcp_call') {
+        pluginContext.addReasoningStep(
+          'mcp_call',
+          'MCP 插件执行异常',
+          pluginId: primary.metadata.id,
+          pluginName: primary.metadata.name,
+          toolName: attrs['tool']?.toString(),
+          arguments: attrs['arguments']?.toString(),
+          status: 'failed',
+          resultSummary: e.toString(),
+        );
+        return false;
+      }
+      final errorMsg =
+          '<toolresult plugin_id="${primary.metadata.id}" tool="$type">插件执行失败: ${e.toString()}</toolresult>';
       pluginContext.addMessage(ChatMessage.create(
         conversationId: pluginContext.assistantMsg.conversationId,
         role: MessageRole.user,
         content: errorMsg,
       ));
-      pluginContext.logger.error('Plugin ${primary.metadata.id} handle failed', 
+      pluginContext.logger.error('Plugin ${primary.metadata.id} handle failed',
           error: e, tag: 'Plugin');
     }
     if (!handled && type != 'mcp_call') {
+      if (!context.mounted) return handled;
       for (final p in _registry.values) {
         if (identical(p, primary)) continue;
         if (!isEnabled(p.metadata.id)) continue;
         final legacy = p.legacyTrigger;
         final raw =
             attrs['raw']?.toString() ?? attrs['content']?.toString() ?? '';
-        if (legacy == null || raw.isEmpty) continue;
-        final match = legacy.firstMatch(raw);
-        if (match == null) continue;
+        if (raw.isEmpty) continue;
+        final match = legacy?.firstMatch(raw);
+        final remoteMatch = BuiltinPromptCatalog.instance.matchesTriggerWords(
+          p.triggerType,
+          raw,
+        );
+        if (match == null && !remoteMatch) continue;
         final legacyAttrs = Map<String, dynamic>.from(attrs);
         legacyAttrs['legacyMatch'] = match;
         legacyAttrs['_legacyRaw'] = raw;

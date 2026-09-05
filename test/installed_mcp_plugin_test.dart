@@ -51,10 +51,15 @@ void main() {
     expect(pc.workingMessages.single.content,
         contains('&quot;&lt;x attr=\\&quot;1\\&quot;&gt;&amp; ok'));
     expect(pc.workingMessages.single.content, contains('plugin_id="mcp.test"'));
-    await expectLater(
-        plugin.handle(tester.element(find.byType(Container)), pc,
-            {'pluginId': 'mcp.test', 'tool': 'missing', 'arguments': '{}'}),
-        throwsA(isA<FormatException>()));
+    await plugin.handle(tester.element(find.byType(Container)), pc, {
+      'pluginId': 'mcp.test',
+      'tool': 'missing',
+      'arguments': '{}',
+    });
+    expect(pc.workingMessages, hasLength(2));
+    expect(pc.workingMessages.last.content,
+        contains('not found'));
+    await tester.pump(const Duration(milliseconds: 300));
   });
 
   test('rejects non-MCP metadata and malformed arguments', () {
@@ -78,6 +83,16 @@ void main() {
       if (method == 'initialize') {
         return http.Response(
             jsonEncode({'jsonrpc': '2.0', 'id': payload['id'], 'result': {}}),
+            200,
+            headers: {'content-type': 'application/json'});
+      }
+      if (method == 'tools/list') {
+        return http.Response(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': payload['id'],
+              'result': {'tools': [_tool('echo')]}
+            }),
             200,
             headers: {'content-type': 'application/json'});
       }
@@ -109,6 +124,7 @@ void main() {
 
     expect(pc.workingMessages, hasLength(1));
     expect(pc.workingMessages.single.content, contains('remote boom'));
+    await tester.pump(const Duration(milliseconds: 300));
   });
 }
 

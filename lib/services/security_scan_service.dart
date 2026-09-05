@@ -3,6 +3,7 @@
 /// 支持三种审查后端：
 ///   1) SkillSpector — 审查 Skill (SKILL.md) 和 MCP 插件安全性
 ///   2) MobSF — 审查 APK 安装包安全性
+library security_scan_service;
 ///   3) VirusTotal — 云端哈希查毒（免费 API Key 500次/天，v1.7.11 新增）
 ///
 /// 用户在设置页配置 endpoint 并启用/禁用审查开关。
@@ -316,9 +317,14 @@ class SecurityScanService {
       }
 
       stopwatch.stop();
-      // 如果轮询拿到了完整报告就用报告，否则用 scan 响应
-      final data = reportData ?? jsonDecode(scanResponse.body) as Map<String, dynamic>;
-      return _parseMobSFResponse(data, stopwatch.elapsed);
+      if (reportData == null) {
+        return SecurityScanResult(
+          success: false,
+          errorMessage: 'MobSF 扫描超时：轮询 10 次仍未完成',
+          scanDuration: stopwatch.elapsed,
+        );
+      }
+      return _parseMobSFResponse(reportData, stopwatch.elapsed);
     } catch (e) {
       stopwatch.stop();
       _logger.error('APK 审查失败: $e', tag: 'SecurityScan');
@@ -372,7 +378,7 @@ class SecurityScanService {
           severity: SecuritySeverity.info,
           safeToInstall: true,
           findings: [
-            SecurityFinding(
+            const SecurityFinding(
               id: 'vt-not-found',
               title: 'VirusTotal 数据库未收录',
               description: '此文件未被 VirusTotal 扫描过，无法判定安全性。可手动上传到 virustotal.com 查询。',
@@ -513,8 +519,13 @@ class SecurityScanService {
 
     // 解析代码问题（v1.7.11 P1 修复：MobSF v4 findings 在 vulnerabilities.findings 下）
     final vulnerabilities = data['vulnerabilities'] as Map<String, dynamic>?;
-    final findings = vulnerabilities?['findings'] as Map<String, dynamic>?
-        ?? data['findings'] as Map<String, dynamic>? ?? {};
+    // v1.7.16 修复：MobSF findings 可能是 List 或 Map，`as Map` 优先级高于 `??`，
+    // List 时会在短路前抛 CastError 被外层 catch 吞掉 → 安全审查静默失效。
+    // 改为先取原始值再判断类型，非 Map 一律给空表，不抛异常。
+    final rawFindings = vulnerabilities?['findings'] ?? data['findings'];
+    final findings = rawFindings is Map
+        ? Map<String, dynamic>.from(rawFindings)
+        : <String, dynamic>{};
     for (final entry in findings.entries) {
       final findingData = entry.value as Map<String, dynamic>? ?? {};
       final severityStr = findingData['severity'] as String? ?? 'info';
@@ -631,14 +642,22 @@ class SecurityScanService {
     for (final entry in permissions.entries) {
       final permData = entry.value as Map<String, dynamic>? ?? {};
       final status = permData['status'] as String? ?? '';
-      if (status == 'dangerous') score += 5;
-      else if (status == 'sensitive') score += 2;
+      if (status == 'dangerous') {
+        score += 5;
+      } else if (status == 'sensitive') {
+        score += 2;
+      }
     }
 
     // 代码发现风险（v1.7.11 P1：findings 在 vulnerabilities.findings 下）
     final vulnerabilities = data['vulnerabilities'] as Map<String, dynamic>?;
-    final findings = vulnerabilities?['findings'] as Map<String, dynamic>?
-        ?? data['findings'] as Map<String, dynamic>? ?? {};
+    // v1.7.16 修复：MobSF findings 可能是 List 或 Map，`as Map` 优先级高于 `??`，
+    // List 时会在短路前抛 CastError 被外层 catch 吞掉 → 安全审查静默失效。
+    // 改为先取原始值再判断类型，非 Map 一律给空表，不抛异常。
+    final rawFindings = vulnerabilities?['findings'] ?? data['findings'];
+    final findings = rawFindings is Map
+        ? Map<String, dynamic>.from(rawFindings)
+        : <String, dynamic>{};
     for (final entry in findings.entries) {
       final findingData = entry.value as Map<String, dynamic>? ?? {};
       final severity = findingData['severity'] as String? ?? 'info';

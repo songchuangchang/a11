@@ -25,6 +25,18 @@ class SearchResultItem {
   });
 }
 
+/// v1.7.24 (#1)：搜索后端策略接口 —— 把按 provider 的 switch 分发改为多态策略。
+///
+/// 每个搜索后端实现 [search]（通用搜索）与 [test]（连接测试）。
+/// 注册表 [kSearchEngines]：加新引擎只需
+///   ① enum 加值 → ② 新增策略类 → ③ 在 [kSearchEngines] 注册一行
+/// 无需再改分发逻辑（原 testConnection / searchGeneral 两处 switch 已移除）。
+abstract class SearchEngine {
+  WebSearchProvider get provider;
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg);
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg);
+}
+
 /// 搜索服务（v1.3.0 重构，v1.3.9 扩展 7 个搜索后端）
 ///
 /// v1.3.9 支持的搜索后端：
@@ -64,255 +76,17 @@ class WebSearchService {
     _logger.info('[WebSearch] Test connection via=${provider.name}', tag: 'WS');
     final t0 = DateTime.now();
 
-    // 统一用一个很便宜的查询词（大部分搜索都能秒返回）
-    const probe = 'android latest version';
     try {
-      switch (provider) {
-        case WebSearchProvider.bing:
-          {
-            final resp = await http
-                .get(
-                  Uri.parse('$_bingUrl?q=${Uri.encodeQueryComponent(probe)}&setlang=en-US'),
-                  headers: {'User-Agent': _ua},
-                )
-                .timeout(const Duration(seconds: 15));
-            final ms = DateTime.now().difference(t0).inMilliseconds;
-            if (resp.statusCode == 200) {
-              _logger.info('[WebSearch] Test Bing OK ${ms}ms len=${resp.body.length}', tag: 'WS');
-              return (true, 'Bing OK · ${ms}ms · 返回 HTML ${resp.body.length} 字节', ms);
-            }
-            return (false, 'Bing HTTP ${resp.statusCode}', ms);
-          }
-        case WebSearchProvider.tavily:
-          {
-            final key = cfg.tavilyApiKey.trim();
-            if (key.isEmpty) {
-              return (false, '请先填入 Tavily API Key 再测试', null);
-            }
-            final resp = await http
-                .post(
-                  Uri.parse(_tavilyUrl),
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'User-Agent': 'AIChat-Android/1.3',
-                  },
-                  body: jsonEncode({
-                    'api_key': key,
-                    'query': probe,
-                    'search_depth': 'basic',
-                    'max_results': 2,
-                    'include_answer': false,
-                    'include_images': false,
-                  }),
-                )
-                .timeout(const Duration(seconds: 20));
-            final ms = DateTime.now().difference(t0).inMilliseconds;
-            if (resp.statusCode == 200) {
-              try {
-                final j = jsonDecode(resp.body) as Map<String, dynamic>;
-                final n = (j['results'] as List?)?.length ?? 0;
-                _logger.info('[WebSearch] Test Tavily OK ${ms}ms results=$n', tag: 'WS');
-                return (true, 'Tavily OK · ${ms}ms · 返回 ${n} 条结果', ms);
-              } catch (_) {
-                return (true, 'Tavily HTTP 200 · ${ms}ms', ms);
-              }
-            }
-            // 4xx 很可能 Key 错
-            String detail = 'Tavily HTTP ${resp.statusCode}';
-            try {
-              final j = jsonDecode(resp.body) as Map<String, dynamic>;
-              final err = j['error'] ?? j['message'];
-              if (err != null) detail += ' · $err';
-            } catch (_) {}
-            _logger.warn('[WebSearch] Test Tavily fail: $detail', tag: 'WS');
-            return (false, detail, ms);
-          }
-        case WebSearchProvider.searxng:
-          {
-            final raw = cfg.searxngInstanceUrl.trim();
-            if (raw.isEmpty) {
-              return (false, '请先填入 SearXNG 实例地址再测试', null);
-            }
-            // 用户输入可能带/也可能不带，规范化
-            final base = raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
-            final uri = Uri.parse('$base/search')
-                .replace(queryParameters: {'q': probe, 'format': 'json', 'categories': 'general'});
-            final resp = await http
-                .get(uri, headers: {'Accept': 'application/json', 'User-Agent': _ua})
-                .timeout(const Duration(seconds: 15));
-            final ms = DateTime.now().difference(t0).inMilliseconds;
-            if (resp.statusCode == 200) {
-              try {
-                final j = jsonDecode(resp.body) as Map<String, dynamic>;
-                final n = (j['results'] as List?)?.length ?? 0;
-                _logger.info('[WebSearch] Test SearXNG OK ${ms}ms results=$n', tag: 'WS');
-                return (true, 'SearXNG OK · ${ms}ms · 返回 ${n} 条结果', ms);
-              } catch (_) {
-                return (false, 'SearXNG 返回格式不是合法 JSON（实例地址对吗？确认结尾/search 支持 format=json）', ms);
-              }
-            }
-            return (false, 'SearXNG HTTP ${resp.statusCode}', ms);
-          }
-        // v1.3.9 新增 4 个搜索后端的测试分支
-        case WebSearchProvider.duckduckgo:
-          {
-            final resp = await http
-                .post(
-                  Uri.parse(_ddgUrl),
-                  headers: {
-                    'User-Agent': _ua,
-                    'Accept': 'text/html,application/xhtml+xml',
-                    'Accept-Language': 'zh-CN,zh;q=0.9',
-                  },
-                  body: {'q': probe, 'b': '1'},
-                )
-                .timeout(const Duration(seconds: 15));
-            final ms = DateTime.now().difference(t0).inMilliseconds;
-            if (resp.statusCode == 200) {
-              final r = _parseDdgResults(
-                  utf8.decode(resp.bodyBytes, allowMalformed: true));
-              _logger.info(
-                  '[WebSearch] Test DuckDuckGo OK ${ms}ms results=${r.length}',
-                  tag: 'WS');
-              return (true, 'DuckDuckGo OK · ${ms}ms · 返回 ${r.length} 条结果', ms);
-            }
-            return (false, 'DuckDuckGo HTTP ${resp.statusCode}', ms);
-          }
-        case WebSearchProvider.serpapi:
-          {
-            final key = cfg.serpApiKey.trim();
-            if (key.isEmpty) {
-              return (false, '请先填入 SerpAPI Key 再测试', null);
-            }
-            final uri = Uri.parse(_serpApiUrl).replace(queryParameters: {
-              'engine': cfg.serpapiEngine.trim().isEmpty
-                  ? 'google'
-                  : cfg.serpapiEngine.trim(),
-              'q': probe,
-              'api_key': key,
-              'num': '2',
-            });
-            final resp = await http
-                .get(uri, headers: {
-                  'User-Agent': 'AIChat-Android/1.3.9',
-                  'Accept': 'application/json',
-                })
-                .timeout(const Duration(seconds: 20));
-            final ms = DateTime.now().difference(t0).inMilliseconds;
-            if (resp.statusCode == 200) {
-              try {
-                final j = jsonDecode(resp.body) as Map<String, dynamic>;
-                final organic = j['organic_results'] as List? ?? [];
-                _logger.info(
-                    '[WebSearch] Test SerpAPI OK ${ms}ms results=${organic.length}',
-                    tag: 'WS');
-                return (true, 'SerpAPI OK · ${ms}ms · 返回 ${organic.length} 条结果', ms);
-              } catch (_) {
-                return (true, 'SerpAPI HTTP 200 · ${ms}ms', ms);
-              }
-            }
-            String detail = 'SerpAPI HTTP ${resp.statusCode}';
-            try {
-              final j = jsonDecode(resp.body) as Map<String, dynamic>;
-              final err = j['error'] ?? j['message'];
-              if (err != null) detail += ' · $err';
-            } catch (_) {}
-            _logger.warn('[WebSearch] Test SerpAPI fail: $detail', tag: 'WS');
-            return (false, detail, ms);
-          }
-        case WebSearchProvider.brave:
-          {
-            final key = cfg.braveApiKey.trim();
-            if (key.isEmpty) {
-              return (false, '请先填入 Brave Search API Key 再测试', null);
-            }
-            final uri = Uri.parse(_braveUrl).replace(queryParameters: {
-              'q': probe,
-              'count': '2',
-              'country': 'cn',
-              'search_lang': 'zh-hans',
-            });
-            final resp = await http
-                .get(uri, headers: {
-                  'User-Agent': 'AIChat-Android/1.3.9',
-                  'Accept': 'application/json',
-                  'Accept-Encoding': 'gzip',
-                  'X-Subscription-Token': key,
-                })
-                .timeout(const Duration(seconds: 20));
-            final ms = DateTime.now().difference(t0).inMilliseconds;
-            if (resp.statusCode == 200) {
-              try {
-                final j = jsonDecode(resp.body) as Map<String, dynamic>;
-                final web =
-                    (j['web']?['results'] as List?) ?? [];
-                _logger.info(
-                    '[WebSearch] Test Brave OK ${ms}ms results=${web.length}',
-                    tag: 'WS');
-                return (true, 'Brave OK · ${ms}ms · 返回 ${web.length} 条结果', ms);
-              } catch (_) {
-                return (true, 'Brave HTTP 200 · ${ms}ms', ms);
-              }
-            }
-            String detail = 'Brave HTTP ${resp.statusCode}';
-            try {
-              final j = jsonDecode(resp.body) as Map<String, dynamic>;
-              final err = j['error']?['message'] ?? j['message'];
-              if (err != null) detail += ' · $err';
-            } catch (_) {}
-            _logger.warn('[WebSearch] Test Brave fail: $detail', tag: 'WS');
-            return (false, detail, ms);
-          }
-        case WebSearchProvider.googlecse:
-          {
-            final key = cfg.googleCseApiKey.trim();
-            final cx = cfg.googleCseId.trim();
-            if (key.isEmpty || cx.isEmpty) {
-              return (false, '请先填入 Google CSE API Key 和搜索引擎 ID (cx) 再测试', null);
-            }
-            final uri = Uri.parse(_googleCseUrl).replace(queryParameters: {
-              'key': key,
-              'cx': cx,
-              'q': probe,
-              'num': '2',
-            });
-            final resp = await http
-                .get(uri, headers: {
-                  'User-Agent': 'AIChat-Android/1.3.9',
-                  'Accept': 'application/json',
-                })
-                .timeout(const Duration(seconds: 20));
-            final ms = DateTime.now().difference(t0).inMilliseconds;
-            if (resp.statusCode == 200) {
-              try {
-                final j = jsonDecode(resp.body) as Map<String, dynamic>;
-                final items = j['items'] as List? ?? [];
-                _logger.info(
-                    '[WebSearch] Test Google CSE OK ${ms}ms items=${items.length}',
-                    tag: 'WS');
-                return (true, 'Google CSE OK · ${ms}ms · 返回 ${items.length} 条结果', ms);
-              } catch (_) {
-                return (true, 'Google CSE HTTP 200 · ${ms}ms', ms);
-              }
-            }
-            String detail = 'Google CSE HTTP ${resp.statusCode}';
-            try {
-              final j = jsonDecode(resp.body) as Map<String, dynamic>;
-              final err = j['error']?['message'];
-              if (err != null) detail += ' · $err';
-            } catch (_) {}
-            _logger.warn('[WebSearch] Test Google CSE fail: $detail', tag: 'WS');
-            return (false, detail, ms);
-          }
+      final engine = kSearchEngines[provider];
+      if (engine == null) {
+        return (false, '未知搜索后端：${provider.name}', null);
       }
+      return await engine.test(cfg);
     } catch (e) {
       final ms = DateTime.now().difference(t0).inMilliseconds;
       _logger.error('[WebSearch] Test connection failed via=${provider.name}', error: e, tag: 'WS');
       return (false, '异常 / Exception: $e', ms);
     }
-    // unreachable: switch is exhaustive + catch returns, but analyzer needs a terminal return
-    return (false, 'unreachable', null);
   }
 
   // ==========================================================================
@@ -335,41 +109,9 @@ class WebSearchService {
     );
 
     try {
-      switch (provider) {
-        case WebSearchProvider.tavily:
-          final r = await _tavilySearch(query, cfg);
-          _logger.info('[WebSearch] Tavily returned ${r.length} results', tag: 'WS');
-          _logger.verbose('[WebSearch] Tavily results for "$query":\n${r.take(5).map((item) => '  - ${item.title}\n    URL: ${item.url}\n    ${item.snippet.substring(0, item.snippet.length > 150 ? 150 : item.snippet.length)}').join('\n')}', tag: 'WS');
-          return r;
-        case WebSearchProvider.searxng:
-          final r = await _searxngSearch(query, cfg);
-          _logger.info('[WebSearch] SearXNG returned ${r.length} results', tag: 'WS');
-          _logger.verbose('[WebSearch] SearXNG results for "$query":\n${r.take(5).map((item) => '  - ${item.title}\n    URL: ${item.url}').join('\n')}', tag: 'WS');
-          return r;
-        case WebSearchProvider.bing:
-          final r = await _bingGeneralSearch(query);
-          _logger.info('[WebSearch] Bing returned ${r.length} results', tag: 'WS');
-          _logger.verbose('[WebSearch] Bing results for "$query":\n${r.take(5).map((item) => '  - ${item.title}\n    URL: ${item.url}').join('\n')}', tag: 'WS');
-          return r;
-        // v1.3.9 新增 4 个搜索后端
-        case WebSearchProvider.duckduckgo:
-          final r = await _duckDuckGoSearch(query);
-          _logger.info('[WebSearch] DuckDuckGo returned ${r.length} results', tag: 'WS');
-          _logger.verbose('[WebSearch] DDG results for "$query":\n${r.take(5).map((item) => '  - ${item.title}\n    URL: ${item.url}').join('\n')}', tag: 'WS');
-          return r;
-        case WebSearchProvider.serpapi:
-          final r = await _serpApiSearch(query, cfg);
-          _logger.info('[WebSearch] SerpAPI returned ${r.length} results', tag: 'WS');
-          return r;
-        case WebSearchProvider.brave:
-          final r = await _braveSearch(query, cfg);
-          _logger.info('[WebSearch] Brave returned ${r.length} results', tag: 'WS');
-          return r;
-        case WebSearchProvider.googlecse:
-          final r = await _googleCseSearch(query, cfg);
-          _logger.info('[WebSearch] Google CSE returned ${r.length} results', tag: 'WS');
-          return r;
-      }
+      final engine = kSearchEngines[provider];
+      if (engine == null) return [];
+      return await engine.search(query, cfg);
     } catch (e, st) {
       _logger.error(
         '[WebSearch] searchGeneral failed via=${provider.name}',
@@ -388,8 +130,6 @@ class WebSearchService {
       }
       return [];
     }
-    // unreachable: switch exhaustive + catch returns, but analyzer needs terminal return
-    return [];
   }
 
   // ==========================================================================
@@ -558,7 +298,7 @@ class WebSearchService {
       }
       // 不是 uddg 形式，直接返回
       if (href.startsWith('//')) {
-        return 'https:${href}';
+        return 'https:$href';
       }
       return href;
     }
@@ -572,7 +312,9 @@ class WebSearchService {
       final url = decodeUddg(href);
       if (url.isEmpty ||
           url.contains('duckduckgo.com') ||
-          url.contains('duck.com')) continue;
+          url.contains('duck.com')) {
+        continue;
+      }
       final title = stripHtml(rawTitle);
       final snippet = i < snippets.length ? stripHtml(snippets[i].group(1) ?? '') : '';
       results.add(SearchResultItem(
@@ -972,15 +714,21 @@ class WebSearchService {
             final lowerTitle = r.title.toLowerCase();
             final lowerSnippet = r.snippet.toLowerCase();
             if (lowerUrl.contains('bing.com') ||
-                lowerUrl.contains('go.microsoft.com')) return false;
+                lowerUrl.contains('go.microsoft.com')) {
+              return false;
+            }
             if (lowerUrl.endsWith('.apk') ||
                 lowerUrl.contains('.apk?') ||
-                lowerUrl.contains('.apk#')) return true;
+                lowerUrl.contains('.apk#')) {
+              return true;
+            }
             if (lowerTitle.contains('下载') ||
                 lowerTitle.contains('apk') ||
                 lowerSnippet.contains('直链') ||
                 lowerSnippet.contains('.apk') ||
-                lowerSnippet.contains('官方下载')) return true;
+                lowerSnippet.contains('官方下载')) {
+              return true;
+            }
             for (final domain in _knownApkDomains) {
               if (lowerUrl.contains(domain)) return true;
             }
@@ -1113,7 +861,18 @@ class WebSearchService {
             lowerUrl.contains('google.com') ||
             lowerUrl.contains('baidu.com') ||
             lowerUrl.contains('sogou.com') ||
-            lowerUrl.contains('so.com')) return false;
+            lowerUrl.contains('so.com')) {
+            return false;
+          }
+
+        // v1.7.31：过滤目录列表页（URL 以 / 结尾或含 index.html/list/ 等目录特征）
+        if (lowerUrl.endsWith('/') ||
+            lowerUrl.contains('/index.htm') ||
+            lowerUrl.contains('/list/') ||
+            lowerUrl.contains('/directory') ||
+            lowerUrl.contains('/browse/')) {
+          return false;
+        }
 
         // 文件直链特征
         final directExts = [
@@ -1122,7 +881,8 @@ class WebSearchService {
           '.mp3', '.wav', '.ogg', '.flac',
           '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
           '.zip', '.rar', '.7z', '.tar', '.gz',
-          '.txt', '.json', '.csv', '.xml', '.html',
+          '.txt', '.json', '.csv', '.xml',
+          // v1.7.31：移除 .html —— HTML 是网页不是可下载文件，保留会导致搜到一堆网页当文件
         ];
         for (final ext in directExts) {
           if (lowerUrl.contains(ext) || lowerUrl.contains('$ext?') || lowerUrl.contains('$ext#')) {
@@ -1277,7 +1037,6 @@ class WebSearchService {
   /// 验证 URL 是否是可下载的 APK 直链
   static Future<String?> validateUrl(String url) async {
     try {
-      // v1.7.1 fix C4: SSRF 防护 - 检查是否为内网地址
       final uri = Uri.parse(url);
       if (!_isSafePublicUri(uri)) {
         return 'Blocked: private/internal address';
@@ -1285,48 +1044,24 @@ class WebSearchService {
 
       int? statusCode;
       Map<String, String>? headers;
-      try {
-        final request = http.Request('HEAD', Uri.parse(url));
-        request.headers['User-Agent'] = _ua;
-        request.followRedirects = true;
-        request.maxRedirects = 5;
-        final client = http.Client();
-        final response = await client.send(request).timeout(
-          const Duration(seconds: 10),
-        );
-        client.close();
-        statusCode = response.statusCode;
-        headers = response.headers;
-      } catch (_) {
-        statusCode = null;
-      }
-
+      final headResult = await _sendHopByHop('HEAD', url, const Duration(seconds: 5));
+      statusCode = headResult.$1;
+      headers = headResult.$2;
       if (statusCode == null || statusCode == 405 || statusCode == 403) {
-        try {
-          final request = http.Request('GET', Uri.parse(url));
-          request.headers['User-Agent'] = _ua;
-          request.followRedirects = true;
-          request.maxRedirects = 5;
-          final client = http.Client();
-          final response = await client.send(request).timeout(
-            const Duration(seconds: 10),
-          );
-          statusCode = response.statusCode;
-          headers = response.headers;
-          client.close();
-        } catch (_) {}
+        final getResult = await _sendHopByHop('GET', url, const Duration(seconds: 5));
+        statusCode = getResult.$1;
+        headers = getResult.$2;
       }
 
-      if (statusCode == null) return 'HTTP unreachable';
-      if (statusCode < 200 || statusCode >= 400) return 'HTTP $statusCode';
-
-      final ct = headers?['content-type'] ?? '';
-      if (ct.contains('text/html')) return 'HTML page, not APK';
+      if (statusCode == null) return '网络无法访问，请检查网络连接';
+      if (statusCode < 200 || statusCode >= 400) {
+        return '服务器返回错误 HTTP $statusCode';
+      }
 
       final clStr = headers?['content-length'];
       if (clStr != null) {
         final cl = int.tryParse(clStr) ?? 0;
-        if (cl > 0 && cl < 10 * 1024) return 'Content too small ($cl bytes)';
+        if (cl > 0 && cl < 10 * 1024) return '文件太小（$cl字节），可能不是APK';
       }
       return null;
     } catch (e) {
@@ -1343,20 +1078,48 @@ class WebSearchService {
         return false;
       }
 
-      final request = http.Request('GET', Uri.parse(url));
-      request.headers['User-Agent'] = _ua;
-      request.followRedirects = true;
-      request.maxRedirects = 5;
-      final client = http.Client();
-      final response = await client.send(request).timeout(
-        const Duration(seconds: 8),
-      );
-      client.close();
-      final sc = response.statusCode;
-      return sc >= 200 && sc < 404;
+      final result = await _sendHopByHop('GET', url, const Duration(seconds: 15));
+      final sc = result.$1;
+      return sc != null && sc >= 200 && sc < 404;
     } catch (_) {
       return false;
     }
+  }
+
+  static Future<(int?, Map<String, String>?)> _sendHopByHop(
+    String method,
+    String url,
+    Duration timeout,
+  ) async {
+    var current = url;
+    for (var hop = 0; hop <= 5; hop++) {
+      final uri = Uri.parse(current);
+      if (!_isSafePublicUri(uri)) {
+        return (null, null);
+      }
+      final request = http.Request(method, uri);
+      request.headers['User-Agent'] = _ua;
+      request.followRedirects = false;
+      final client = http.Client();
+      try {
+        final response = await client.send(request).timeout(timeout);
+        final sc = response.statusCode;
+        if (sc >= 300 && sc < 400) {
+          final location = response.headers['location'];
+          if (location == null || location.isEmpty) {
+            return (sc, response.headers);
+          }
+          current = uri.resolve(location).toString();
+          continue;
+        }
+        return (sc, response.headers);
+      } catch (_) {
+        return (null, null);
+      } finally {
+        client.close();
+      }
+    }
+    return (null, null);
   }
 
   /// v1.7.1 fix C4: SSRF 防护 - 检查 URI 是否为安全的公网地址（非内网/环回/链路本地）
@@ -1421,3 +1184,365 @@ class WebSearchService {
     return true;
   }
 }
+
+
+// ============================================================================
+// #1 Strategy Pattern 策略实现（v1.7.24）
+// 每个搜索后端一个策略类：search（通用搜索）+ test（连接测试）。
+// 注册表 kSearchEngines 见文件末尾。加新引擎：
+//   ① WebSearchProvider enum 加值 → ② 新增策略类 → ③ kSearchEngines 注册一行
+// ============================================================================
+
+class BingSearchEngine implements SearchEngine {
+  @override
+  WebSearchProvider get provider => WebSearchProvider.bing;
+
+  @override
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg) =>
+      WebSearchService._bingGeneralSearch(query);
+
+  @override
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg) async {
+    const probe = 'android latest version';
+    final t0 = DateTime.now();
+    try {
+      final resp = await http.get(
+        Uri.parse('${WebSearchService._bingUrl}?q=${Uri.encodeQueryComponent(probe)}&setlang=en-US'),
+        headers: {'User-Agent': WebSearchService._ua},
+      ).timeout(const Duration(seconds: 15));
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      if (resp.statusCode == 200) {
+        WebSearchService._logger.info('[WebSearch] Test Bing OK ${ms}ms len=${resp.body.length}', tag: 'WS');
+        return (true, 'Bing OK · ${ms}ms · 返回 HTML ${resp.body.length} 字节', ms);
+      }
+      return (false, 'Bing HTTP ${resp.statusCode}', ms);
+    } catch (e) {
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      WebSearchService._logger.error('[WebSearch] Test connection failed via=bing', error: e, tag: 'WS');
+      return (false, '异常 / Exception: $e', ms);
+    }
+  }
+}
+
+class TavilySearchEngine implements SearchEngine {
+  @override
+  WebSearchProvider get provider => WebSearchProvider.tavily;
+
+  @override
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg) =>
+      WebSearchService._tavilySearch(query, cfg);
+
+  @override
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg) async {
+    const probe = 'android latest version';
+    final t0 = DateTime.now();
+    final key = cfg.tavilyApiKey.trim();
+    if (key.isEmpty) {
+      return (false, '请先填入 Tavily API Key 再测试', null);
+    }
+    try {
+      final resp = await http.post(
+        Uri.parse(WebSearchService._tavilyUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'AIChat-Android/1.3',
+        },
+        body: jsonEncode({
+          'api_key': key,
+          'query': probe,
+          'search_depth': 'basic',
+          'max_results': 2,
+          'include_answer': false,
+          'include_images': false,
+        }),
+      ).timeout(const Duration(seconds: 20));
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      if (resp.statusCode == 200) {
+        try {
+          final j = jsonDecode(resp.body) as Map<String, dynamic>;
+          final n = (j['results'] as List?)?.length ?? 0;
+          WebSearchService._logger.info('[WebSearch] Test Tavily OK ${ms}ms results=$n', tag: 'WS');
+          return (true, 'Tavily OK · ${ms}ms · 返回 $n 条结果', ms);
+        } catch (_) {
+          return (true, 'Tavily HTTP 200 · ${ms}ms', ms);
+        }
+      }
+      String detail = 'Tavily HTTP ${resp.statusCode}';
+      try {
+        final j = jsonDecode(resp.body) as Map<String, dynamic>;
+        final err = j['error'] ?? j['message'];
+        if (err != null) detail += ' · $err';
+      } catch (_) {}
+      WebSearchService._logger.warn('[WebSearch] Test Tavily fail: $detail', tag: 'WS');
+      return (false, detail, ms);
+    } catch (e) {
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      WebSearchService._logger.error('[WebSearch] Test connection failed via=tavily', error: e, tag: 'WS');
+      return (false, '异常 / Exception: $e', ms);
+    }
+  }
+}
+
+class SearxngSearchEngine implements SearchEngine {
+  @override
+  WebSearchProvider get provider => WebSearchProvider.searxng;
+
+  @override
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg) =>
+      WebSearchService._searxngSearch(query, cfg);
+
+  @override
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg) async {
+    const probe = 'android latest version';
+    final t0 = DateTime.now();
+    final raw = cfg.searxngInstanceUrl.trim();
+    if (raw.isEmpty) {
+      return (false, '请先填入 SearXNG 实例地址再测试', null);
+    }
+    final base = raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
+    try {
+      final uri = Uri.parse('$base/search')
+          .replace(queryParameters: {'q': probe, 'format': 'json', 'categories': 'general'});
+      final resp = await http
+          .get(uri, headers: {'Accept': 'application/json', 'User-Agent': WebSearchService._ua})
+          .timeout(const Duration(seconds: 15));
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      if (resp.statusCode == 200) {
+        try {
+          final j = jsonDecode(resp.body) as Map<String, dynamic>;
+          final n = (j['results'] as List?)?.length ?? 0;
+          WebSearchService._logger.info('[WebSearch] Test SearXNG OK ${ms}ms results=$n', tag: 'WS');
+          return (true, 'SearXNG OK · ${ms}ms · 返回 $n 条结果', ms);
+        } catch (_) {
+          return (false, 'SearXNG 返回格式不是合法 JSON（实例地址对吗？确认结尾/search 支持 format=json）', ms);
+        }
+      }
+      return (false, 'SearXNG HTTP ${resp.statusCode}', ms);
+    } catch (e) {
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      WebSearchService._logger.error('[WebSearch] Test connection failed via=searxng', error: e, tag: 'WS');
+      return (false, '异常 / Exception: $e', ms);
+    }
+  }
+}
+
+class DuckDuckGoSearchEngine implements SearchEngine {
+  @override
+  WebSearchProvider get provider => WebSearchProvider.duckduckgo;
+
+  @override
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg) =>
+      WebSearchService._duckDuckGoSearch(query);
+
+  @override
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg) async {
+    const probe = 'android latest version';
+    final t0 = DateTime.now();
+    try {
+      final resp = await http.post(
+        Uri.parse(WebSearchService._ddgUrl),
+        headers: {
+          'User-Agent': WebSearchService._ua,
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+        },
+        body: {'q': probe, 'b': '1'},
+      ).timeout(const Duration(seconds: 15));
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      if (resp.statusCode == 200) {
+        final r = WebSearchService._parseDdgResults(
+            utf8.decode(resp.bodyBytes, allowMalformed: true));
+        WebSearchService._logger.info('[WebSearch] Test DuckDuckGo OK ${ms}ms results=${r.length}', tag: 'WS');
+        return (true, 'DuckDuckGo OK · ${ms}ms · 返回 ${r.length} 条结果', ms);
+      }
+      return (false, 'DuckDuckGo HTTP ${resp.statusCode}', ms);
+    } catch (e) {
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      WebSearchService._logger.error('[WebSearch] Test connection failed via=duckduckgo', error: e, tag: 'WS');
+      return (false, '异常 / Exception: $e', ms);
+    }
+  }
+}
+
+class SerpApiSearchEngine implements SearchEngine {
+  @override
+  WebSearchProvider get provider => WebSearchProvider.serpapi;
+
+  @override
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg) =>
+      WebSearchService._serpApiSearch(query, cfg);
+
+  @override
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg) async {
+    const probe = 'android latest version';
+    final t0 = DateTime.now();
+    final key = cfg.serpApiKey.trim();
+    if (key.isEmpty) {
+      return (false, '请先填入 SerpAPI Key 再测试', null);
+    }
+    try {
+      final uri = Uri.parse(WebSearchService._serpApiUrl).replace(queryParameters: {
+        'engine': cfg.serpapiEngine.trim().isEmpty ? 'google' : cfg.serpapiEngine.trim(),
+        'q': probe,
+        'api_key': key,
+        'num': '2',
+      });
+      final resp = await http
+          .get(uri, headers: {
+            'User-Agent': 'AIChat-Android/1.3.9',
+            'Accept': 'application/json',
+          })
+          .timeout(const Duration(seconds: 20));
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      if (resp.statusCode == 200) {
+        try {
+          final j = jsonDecode(resp.body) as Map<String, dynamic>;
+          final organic = j['organic_results'] as List? ?? [];
+          WebSearchService._logger.info('[WebSearch] Test SerpAPI OK ${ms}ms results=${organic.length}', tag: 'WS');
+          return (true, 'SerpAPI OK · ${ms}ms · 返回 ${organic.length} 条结果', ms);
+        } catch (_) {
+          return (true, 'SerpAPI HTTP 200 · ${ms}ms', ms);
+        }
+      }
+      String detail = 'SerpAPI HTTP ${resp.statusCode}';
+      try {
+        final j = jsonDecode(resp.body) as Map<String, dynamic>;
+        final err = j['error'] ?? j['message'];
+        if (err != null) detail += ' · $err';
+      } catch (_) {}
+      WebSearchService._logger.warn('[WebSearch] Test SerpAPI fail: $detail', tag: 'WS');
+      return (false, detail, ms);
+    } catch (e) {
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      WebSearchService._logger.error('[WebSearch] Test connection failed via=serpapi', error: e, tag: 'WS');
+      return (false, '异常 / Exception: $e', ms);
+    }
+  }
+}
+
+class BraveSearchEngine implements SearchEngine {
+  @override
+  WebSearchProvider get provider => WebSearchProvider.brave;
+
+  @override
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg) =>
+      WebSearchService._braveSearch(query, cfg);
+
+  @override
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg) async {
+    const probe = 'android latest version';
+    final t0 = DateTime.now();
+    final key = cfg.braveApiKey.trim();
+    if (key.isEmpty) {
+      return (false, '请先填入 Brave Search API Key 再测试', null);
+    }
+    try {
+      final uri = Uri.parse(WebSearchService._braveUrl).replace(queryParameters: {
+        'q': probe,
+        'count': '2',
+        'country': 'cn',
+        'search_lang': 'zh-hans',
+      });
+      final resp = await http
+          .get(uri, headers: {
+            'User-Agent': 'AIChat-Android/1.3.9',
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip',
+            'X-Subscription-Token': key,
+          })
+          .timeout(const Duration(seconds: 20));
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      if (resp.statusCode == 200) {
+        try {
+          final j = jsonDecode(resp.body) as Map<String, dynamic>;
+          final web = (j['web']?['results'] as List?) ?? [];
+          WebSearchService._logger.info('[WebSearch] Test Brave OK ${ms}ms results=${web.length}', tag: 'WS');
+          return (true, 'Brave OK · ${ms}ms · 返回 ${web.length} 条结果', ms);
+        } catch (_) {
+          return (true, 'Brave HTTP 200 · ${ms}ms', ms);
+        }
+      }
+      String detail = 'Brave HTTP ${resp.statusCode}';
+      try {
+        final j = jsonDecode(resp.body) as Map<String, dynamic>;
+        final err = j['error']?['message'] ?? j['message'];
+        if (err != null) detail += ' · $err';
+      } catch (_) {}
+      WebSearchService._logger.warn('[WebSearch] Test Brave fail: $detail', tag: 'WS');
+      return (false, detail, ms);
+    } catch (e) {
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      WebSearchService._logger.error('[WebSearch] Test connection failed via=brave', error: e, tag: 'WS');
+      return (false, '异常 / Exception: $e', ms);
+    }
+  }
+}
+
+class GoogleCseSearchEngine implements SearchEngine {
+  @override
+  WebSearchProvider get provider => WebSearchProvider.googlecse;
+
+  @override
+  Future<List<SearchResultItem>> search(String query, WebSearchConfig cfg) =>
+      WebSearchService._googleCseSearch(query, cfg);
+
+  @override
+  Future<(bool ok, String message, int? latencyMs)> test(WebSearchConfig cfg) async {
+    const probe = 'android latest version';
+    final t0 = DateTime.now();
+    final key = cfg.googleCseApiKey.trim();
+    final cx = cfg.googleCseId.trim();
+    if (key.isEmpty || cx.isEmpty) {
+      return (false, '请先填入 Google CSE API Key 和搜索引擎 ID (cx) 再测试', null);
+    }
+    try {
+      final uri = Uri.parse(WebSearchService._googleCseUrl).replace(queryParameters: {
+        'key': key,
+        'cx': cx,
+        'q': probe,
+        'num': '2',
+      });
+      final resp = await http
+          .get(uri, headers: {
+            'User-Agent': 'AIChat-Android/1.3.9',
+            'Accept': 'application/json',
+          })
+          .timeout(const Duration(seconds: 20));
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      if (resp.statusCode == 200) {
+        try {
+          final j = jsonDecode(resp.body) as Map<String, dynamic>;
+          final items = j['items'] as List? ?? [];
+          WebSearchService._logger.info('[WebSearch] Test Google CSE OK ${ms}ms items=${items.length}', tag: 'WS');
+          return (true, 'Google CSE OK · ${ms}ms · 返回 ${items.length} 条结果', ms);
+        } catch (_) {
+          return (true, 'Google CSE HTTP 200 · ${ms}ms', ms);
+        }
+      }
+      String detail = 'Google CSE HTTP ${resp.statusCode}';
+      try {
+        final j = jsonDecode(resp.body) as Map<String, dynamic>;
+        final err = j['error']?['message'];
+        if (err != null) detail += ' · $err';
+      } catch (_) {}
+      WebSearchService._logger.warn('[WebSearch] Test Google CSE fail: $detail', tag: 'WS');
+      return (false, detail, ms);
+    } catch (e) {
+      final ms = DateTime.now().difference(t0).inMilliseconds;
+      WebSearchService._logger.error('[WebSearch] Test connection failed via=googlecse', error: e, tag: 'WS');
+      return (false, '异常 / Exception: $e', ms);
+    }
+  }
+}
+
+/// 搜索引擎注册表（#1）：加新引擎在此注册一行即可，分发逻辑无需改动。
+final Map<WebSearchProvider, SearchEngine> kSearchEngines = {
+  WebSearchProvider.bing: BingSearchEngine(),
+  WebSearchProvider.tavily: TavilySearchEngine(),
+  WebSearchProvider.searxng: SearxngSearchEngine(),
+  WebSearchProvider.duckduckgo: DuckDuckGoSearchEngine(),
+  WebSearchProvider.serpapi: SerpApiSearchEngine(),
+  WebSearchProvider.brave: BraveSearchEngine(),
+  WebSearchProvider.googlecse: GoogleCseSearchEngine(),
+};

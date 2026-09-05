@@ -118,7 +118,7 @@ void main() {
     });
 
     test('混合文本 + 多个敏感字段', () {
-      final msg = '''
+      const msg = '''
 User asked something.
 Headers: Authorization: Bearer sk-****1234567890ABCD
 Also: apiKey=pk-xxxxyyyy000011112222

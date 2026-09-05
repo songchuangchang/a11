@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/skill_models.dart';
+import 'github_search_service.dart';
 import 'logger_service.dart';
 
 /// Skill 市场服务
@@ -86,7 +88,7 @@ class SkillRegistryService {
     final response = await http.get(uri, headers: {
       'Accept': 'application/json',
       'User-Agent': 'Nexus-App/1.0',
-    }).timeout(const Duration(seconds: 15));
+    }).timeout(const Duration(seconds: 30));
 
     if (response.statusCode != 200) {
       _logger.error('SkillsMP API 返回 ${response.statusCode}', tag: 'Skill');
@@ -173,7 +175,7 @@ class SkillRegistryService {
     final response = await http.get(uri, headers: {
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'Nexus-App/1.0',
-    }).timeout(const Duration(seconds: 15));
+    }).timeout(const Duration(seconds: 30));
 
     if (response.statusCode != 200) {
       _logger.error('GitHub API 返回 ${response.statusCode}', tag: 'Skill');
@@ -211,28 +213,110 @@ class SkillRegistryService {
   }
 
   /// 下载 SKILL.md 内容
-  static Future<String> downloadSkillContent(String url) async {
+  ///
+  /// v1.7.18（需求1）：接入 GitHub 代理 + 30s 超时 + 代理失败回退直连 + 中文友好异常。
+  /// - [proxyUrl] 来自 WebSearchConfig.githubProxyUrl（与 APP 下载同源），
+  ///   非空时经 [GitHubSearchService.rewriteDownloadUrl] 重写为镜像地址。
+  /// - 代理失败/超时且 effectiveUrl != rawUrl → 自动回退 rawUrl 直连。
+  /// - 全失败抛中文 Exception（调用方 plugin_market_screen catch 已用 $error 拼 SnackBar 透传）。
+  static Future<String> downloadSkillContent(String url,
+      {String proxyUrl = ''}) async {
+    final rawUrl = url;
+    final useProxy = proxyUrl.trim().isNotEmpty;
+    _logger.info(
+        '下载技能内容: $rawUrl (proxy=${useProxy ? "on" : "off"})',
+        tag: 'Skill');
+
+    final effectiveUrl = useProxy
+        ? GitHubSearchService.rewriteDownloadUrl(rawUrl, proxyUrl.trim())
+        : rawUrl;
+
+    final headers = <String, String>{
+      'Accept': 'text/markdown, text/plain, */*',
+      'User-Agent': 'Nexus-App/1.0',
+    };
+
+    // 主路径：effectiveUrl（代理或直连）
     try {
-      _logger.info('下载技能内容: $url', tag: 'Skill');
-
-      final response = await http.get(
-        Uri.parse(url),
-        headers: {
-          'Accept': 'text/markdown, text/plain, */*',
-          'User-Agent': 'Nexus-App/1.0',
-        },
-      ).timeout(const Duration(seconds: 15));
-
+      final response = await http
+          .get(Uri.parse(effectiveUrl), headers: headers)
+          .timeout(const Duration(seconds: 30));
       if (response.statusCode == 200) {
-        _logger.info('成功下载技能内容 (${response.body.length} 字节)', tag: 'Skill');
+        _logger.info(
+            '成功下载技能内容 (${response.body.length} 字节)'
+            '${useProxy ? " [代理]" : ""}',
+            tag: 'Skill');
         return response.body;
-      } else {
-        throw Exception('下载失败: HTTP ${response.statusCode}');
       }
+      throw Exception('HTTP ${response.statusCode}');
     } catch (e) {
+      // v1.7.31：失败后先尝试 jsdelivr 镜像（raw.githubusercontent.com 在部分地区被墙）
+      final jsdelivrUrl = _jsdelivrMirror(rawUrl);
+      if (jsdelivrUrl != null) {
+        _logger.warn(
+            '下载失败($e)，尝试 jsdelivr 镜像: $jsdelivrUrl',
+            tag: 'Skill');
+        try {
+          final response = await http
+              .get(Uri.parse(jsdelivrUrl), headers: headers)
+              .timeout(const Duration(seconds: 30));
+          if (response.statusCode == 200) {
+            _logger.info(
+                'jsdelivr 镜像下载成功 (${response.body.length} 字节)',
+                tag: 'Skill');
+            return response.body;
+          }
+        } catch (e2) {
+          _logger.warn('jsdelivr 镜像下载失败($e2)', tag: 'Skill');
+        }
+      }
+      // 代理失败 → 回退直连（effectiveUrl != rawUrl 才回退，因为直连已试过）
+      if (effectiveUrl != rawUrl) {
+        _logger.warn('回退直连: $rawUrl', tag: 'Skill');
+        try {
+          final direct = await http
+              .get(Uri.parse(rawUrl), headers: headers)
+              .timeout(const Duration(seconds: 30));
+          if (direct.statusCode == 200) {
+            _logger.info(
+                '直连下载成功 (${direct.body.length} 字节)',
+                tag: 'Skill');
+            return direct.body;
+          }
+          throw Exception('HTTP ${direct.statusCode}');
+        } on TimeoutException {
+          _logger.error('直连下载超时(30s): $rawUrl', tag: 'Skill');
+          throw Exception(
+              '下载超时（30s），请检查网络或在「设置-联网搜索」配置 GitHub 代理');
+        } catch (e2) {
+          _logger.error('直连下载失败: $e2', tag: 'Skill');
+          throw Exception(
+              '下载失败：代理、jsdelivr、直连均不可用（$e2），请检查网络或在「设置-联网搜索」配置 GitHub 代理');
+        }
+      }
+      // 无代理，直连+jsdelivr 均失败
+      if (e is TimeoutException) {
+        _logger.error('下载超时(30s): $rawUrl', tag: 'Skill');
+        throw Exception(
+            '下载超时（30s），请检查网络或在「设置-联网搜索」配置 GitHub 代理');
+      }
       _logger.error('下载技能异常: $e', tag: 'Skill');
-      rethrow;
+      throw Exception('下载失败：$e，请检查网络或在「设置-联网搜索」配置 GitHub 代理');
     }
+  }
+
+  /// v1.7.31：将 raw.githubusercontent.com URL 转换为 fastly.jsdelivr.net 镜像。
+  /// 复制自 local_scan_service.dart 的同名方法。
+  static String? _jsdelivrMirror(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host != 'raw.githubusercontent.com') return null;
+    final segs = uri.pathSegments;
+    if (segs.length < 4) return null;
+    final owner = segs[0];
+    final repo = segs[1];
+    final branch = segs[2];
+    final filePath = segs.sublist(3).join('/');
+    return 'https://fastly.jsdelivr.net/gh/$owner/$repo@$branch/$filePath';
   }
 
   /// 测试连接（用 GitHub API 作为连通性检测）

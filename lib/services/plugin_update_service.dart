@@ -1,10 +1,13 @@
 /// 插件更新检查服务
 ///
 /// 检查已安装的 MCP 和 Skill 插件是否有新版本可用
+library plugin_update_service;
 
 import 'logger_service.dart';
 import '../plugins/plugin_interface.dart';
 import '../plugins/plugin_registry.dart';
+import '../models/skill_models.dart';
+import '../models/mcp_market_models.dart';
 import 'skill_registry_service.dart';
 import 'skill_parser.dart';
 import 'mcp_registry_service.dart';
@@ -30,12 +33,125 @@ class PluginUpdateInfo {
 class PluginUpdateService {
   static final LoggerService _logger = LoggerService.instance;
 
+  /// 执行单个插件的更新（v1.7.12 补真实执行逻辑，之前是 TODO 占位）
+  ///
+  /// 返回 (success, message)
+  static Future<(bool, String)> updatePlugin(
+    PluginUpdateInfo info,
+    PluginRegistry registry,
+  ) async {
+    final pluginId = info.pluginId;
+    final plugin = registry.getById(pluginId);
+    if (plugin == null) return (false, '插件未安装: $pluginId');
+    final kind = plugin.metadata.kind;
+
+    try {
+      if (kind.isDeclarative) {
+        return await _updateSkill(info, registry, plugin);
+      } else if (kind.isRemote) {
+        return await _updateMcp(info, registry);
+      }
+      // v1.7.14：代码审查指出 PluginKind enum 仅 declarative/mcpRemote 两值，
+      // 此分支实际不可达；保留以防未来加新 PluginKind 漏改这里，至少返回明确错误而非
+      // 静默穿透到 (true, ...) 默认值。返回字段含 ${kind.name} 便于排错。
+      return (false, '不支持的插件类型: ${kind.name}');
+    } catch (e, st) {
+      _logger.error('更新插件失败 [$pluginId]: $e',
+          error: e, stack: st, tag: 'PluginUpdate');
+      return (false, '更新失败: $e');
+    }
+  }
+
+  /// Skill 更新：重新下载 SKILL.md → 解析 metadata → 调用 installDeclarative 覆盖安装
+  static Future<(bool, String)> _updateSkill(
+    PluginUpdateInfo info,
+    PluginRegistry registry,
+    dynamic plugin,
+  ) async {
+    _logger.info('Skill 更新开始: ${info.pluginId} v${info.currentVersion}→v${info.latestVersion}',
+        tag: 'PluginUpdate');
+    final metadata = plugin.metadata as PluginMetadata;
+    final extraUrl = metadata.extra['downloadUrl'];
+    final downloadUrl = (extraUrl is String && extraUrl.trim().isNotEmpty)
+        ? extraUrl.trim()
+        : metadata.homepage;
+    if (downloadUrl.isEmpty) {
+      return (false, '缺少下载 URL');
+    }
+    // 下载 + 解析最新 SKILL.md
+    final content = await SkillRegistryService.downloadSkillContent(downloadUrl);
+    final ParsedSkill parsed;
+    try {
+      parsed = SkillParser.parse(content);
+    } catch (e) {
+      return (false, '解析 SKILL.md 失败: $e');
+    }
+    // 保留原 extra 中的 downloadUrl/skillSummary，构造新 metadata
+    final extra = Map<String, dynamic>.from(metadata.extra);
+    extra['downloadUrl'] = downloadUrl;
+    // v1.7.12：跟 _installSkill 写法保持一致
+    // SkillMetadata 没有 promptProtocol 字段，SKILL.md 正文 instruction 直接存进 promptProtocol
+    // （DeclarativePlugin 用 promptProtocol 字段承载 Skill 的正文内容）
+    final String effectiveProtocol = parsed.instruction;
+    // 用原 id 保证覆盖安装（parsed.metadata 的 id/version 用最新的）
+    final newMeta = PluginMetadata(
+      id: metadata.id,
+      name: parsed.metadata.name,
+      version: parsed.metadata.version ?? info.latestVersion,
+      author: parsed.metadata.author ?? metadata.author,
+      description: parsed.metadata.description,
+      homepage: parsed.metadata.homepage ?? metadata.homepage,
+      promptProtocol: effectiveProtocol,
+      tags: parsed.metadata.tags,
+      kind: PluginKind.declarative,
+      triggerType: metadata.triggerType,
+      extra: extra,
+    );
+    await registry.installDeclarative(newMeta);
+    _logger.info('Skill 更新成功: ${info.pluginId} → v${newMeta.version}',
+        tag: 'PluginUpdate');
+    return (true, '已更新到 v${newMeta.version}');
+  }
+
+  /// MCP 更新：从 McpRegistry 重新获取最新 server → 重跑 installRemoteMcp（会 upsert 覆盖）
+  static Future<(bool, String)> _updateMcp(
+    PluginUpdateInfo info,
+    PluginRegistry registry,
+  ) async {
+    _logger.info('MCP 更新开始: ${info.pluginId} v${info.currentVersion}→v${info.latestVersion}',
+        tag: 'PluginUpdate');
+    final mcpSvc = McpRegistryService();
+    final page = await mcpSvc.fetchPage(limit: 50, search: info.pluginId);
+    McpRegistryServer? target;
+    for (final s in page.servers) {
+      if (s.name == info.pluginId) {
+        target = s;
+        break;
+      }
+    }
+    if (target == null) {
+      return (false, '在 MCP Registry 中未找到服务器: ${info.pluginId}');
+    }
+    // 重新安装（方法内部走 upsertPlugin 覆盖）
+    await registry.installRemoteMcp(target);
+    _logger.info('MCP 更新成功: ${info.pluginId} → v${target.version}',
+        tag: 'PluginUpdate');
+    return (true, '已更新到 v${target.version}');
+  }
+
   /// 检查所有已安装插件的更新
   static Future<List<PluginUpdateInfo>> checkAllUpdates(PluginRegistry registry) async {
     final plugins = registry.plugins;
     final updates = <PluginUpdateInfo>[];
 
     for (final plugin in plugins) {
+      // v1.7.12：跳过 system 来源插件（内置的 search/download/ask_user/self_check/answer）
+      // 它们的 homepage 填的是伪域名 nexus.local，更新检查去请求会 DNS 失败刷屏 ERROR 日志。
+      // System 插件随 App 版本一起升级，不需要单独检查更新。
+      if (plugin.source == PluginSource.system) {
+        _logger.info('跳过 System 插件更新检查: ${plugin.metadata.id}', tag: 'PluginUpdate');
+        continue;
+      }
       try {
         final updateInfo = await checkPluginUpdate(plugin);
         if (updateInfo != null && updateInfo.hasUpdate) {
@@ -60,9 +176,9 @@ class PluginUpdateService {
     final kind = metadata.kind;
 
     // 根据插件类型选择不同的检查方式
-    if (kind == PluginKind.mcpRemote) {
+    if (kind.isRemote) {
       return await _checkMcpUpdate(pluginId, currentVersion);
-    } else if (kind == PluginKind.declarative) {
+    } else if (kind.isDeclarative) {
       return await _checkSkillUpdate(pluginId, currentVersion, metadata);
     }
 

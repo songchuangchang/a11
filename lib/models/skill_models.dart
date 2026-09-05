@@ -1,5 +1,6 @@
 /// v1.7.3 Skill 市场模型
 /// 支持从公开市场（skills.sh / Agent Skill Exchange）获取 SKILL.md 格式的技能
+library skill_models;
 
 /// Skill 元数据（从 SKILL.md frontmatter 解析）
 class SkillMetadata {

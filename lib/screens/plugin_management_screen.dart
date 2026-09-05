@@ -46,7 +46,12 @@ class _PluginManagementScreenState extends State<PluginManagementScreen> {
     final isZh = Localizations.localeOf(context).languageCode == 'zh';
     final registry = context.watch<PluginRegistry>();
     final allPlugins = registry.plugins;
-    final systemPlugins = allPlugins.where((p) => p.source == PluginSource.system).toList();
+    // v1.7.36：联网搜索已内置为默认能力（不可关），不再出现在插件管理页
+    final systemPlugins = allPlugins
+        .where((p) =>
+            p.source == PluginSource.system &&
+            p.metadata.id != PluginRegistry.kSearchPluginId)
+        .toList();
     final installedPlugins = allPlugins.where((p) => p.source == PluginSource.installed).toList();
     final isEmpty = allPlugins.isEmpty;
 
@@ -128,6 +133,7 @@ class _PluginManagementScreenState extends State<PluginManagementScreen> {
   }
 
   Widget _buildPluginTile(ReActPlugin plugin, PluginRegistry registry, bool isZh) {
+    final colorScheme = Theme.of(context).colorScheme;
     final icon = switch (plugin.source) {
       PluginSource.system => Icons.extension,
       PluginSource.installed => Icons.install_desktop,
@@ -144,7 +150,7 @@ class _PluginManagementScreenState extends State<PluginManagementScreen> {
     return InkWell(
       onLongPress: () => _showPluginDetails(plugin, isZh),
       child: ListTile(
-        leading: Icon(icon, color: Theme.of(context).colorScheme.primary),
+        leading: Icon(icon, color: colorScheme.primary),
         title: Row(
           children: [
             Expanded(
@@ -159,14 +165,14 @@ class _PluginManagementScreenState extends State<PluginManagementScreen> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.orange,
+                  color: colorScheme.tertiary,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
                   'v${updateInfo.latestVersion}',
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 10,
-                    color: Colors.white,
+                    color: colorScheme.onPrimary,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -184,14 +190,14 @@ class _PluginManagementScreenState extends State<PluginManagementScreen> {
             if (hasUpdate)
               IconButton(
                 icon: const Icon(Icons.system_update, size: 20),
-                color: Colors.orange,
+                color: colorScheme.tertiary,
                 tooltip: isZh ? '更新' : 'Update',
                 onPressed: () => _updatePlugin(plugin, updateInfo, registry, isZh),
               ),
             if (canUninstall)
               IconButton(
                 icon: const Icon(Icons.delete_outline, size: 20),
-                color: Colors.redAccent,
+                color: colorScheme.error,
                 tooltip: isZh ? '卸载' : 'Uninstall',
                 onPressed: () => _confirmUninstall(plugin, registry, isZh),
               ),
@@ -208,6 +214,7 @@ class _PluginManagementScreenState extends State<PluginManagementScreen> {
     PluginRegistry registry,
     bool isZh,
   ) async {
+    final colorScheme = Theme.of(context).colorScheme;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -225,17 +232,39 @@ class _PluginManagementScreenState extends State<PluginManagementScreen> {
       ),
     );
     if (confirmed != true) return;
-    
+
+    // v1.7.14：接入 PluginUpdateService.updatePlugin（service 在 v1.7.12 已实现，
+    // 但 plugin_management_screen 一直留着 v1.7.5 的 TODO 占位，导致点"更新"按钮
+    // 永远只显示开发中提示而不真正执行更新。本行把 UI 接入 service，让 Skill 重新
+    // 下载 SKILL.md 覆盖安装、MCP 重新 fetch registry + installRemoteMcp 真正生效。
     try {
-      // TODO: 实现实际的插件更新逻辑（下载新版本并替换）
+      final (success, message) =
+          await PluginUpdateService.updatePlugin(updateInfo, registry);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(isZh ? '更新功能开发中...' : 'Update feature in development...'),
+        content: Text(success
+            ? (isZh ? '更新成功: $message' : 'Update successful: $message')
+            : (isZh ? '更新失败: $message' : 'Update failed: $message')),
+        backgroundColor: success ? colorScheme.primary : colorScheme.error,
         behavior: SnackBarBehavior.floating,
       ));
+      // 更新成功 → 移除 _updates 里对应条目，更新按钮自动消失（registry.plugins 已
+      // 被 installDeclarative / installRemoteMcp 内部 notifyListeners 触发 rebuild，
+      // 新版本号会从 plugin.metadata.version 反映出来）
+      if (success) {
+        setState(() {
+          _updates = _updates
+              .where((u) => u.pluginId != updateInfo.pluginId)
+              .toList();
+        });
+      }
     } catch (e) {
+      // PluginUpdateService.updatePlugin 内部已 try-catch 返回 (false, msg)，
+      // 这里是双保险（理论上不应到达）
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(isZh ? '更新失败：$e' : 'Update failed: $e'),
-        backgroundColor: Colors.redAccent,
+        backgroundColor: colorScheme.error,
         behavior: SnackBarBehavior.floating,
       ));
     }

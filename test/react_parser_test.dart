@@ -84,7 +84,7 @@ void main() {
 
   group('<thinking>/<answer>/<ask_user> 配对标签', () {
     test('普通 answer 解析', () {
-      final s = '<thinking>思考中...</thinking><answer>你好世界</answer>';
+      const s = '<thinking>思考中...</thinking><answer>你好世界</answer>';
       final answerOpen = s.indexOf('<answer>');
       expect(answerOpen, greaterThan(0));
       final close = s.indexOf('</answer>', answerOpen);
@@ -93,7 +93,7 @@ void main() {
     });
 
     test('ask_user 解析（v1.4.1 曾经失效）', () {
-      final s = '<thinking>用户信息缺失</thinking><ask_user>请告诉我你的名字</ask_user>';
+      const s = '<thinking>用户信息缺失</thinking><ask_user>请告诉我你的名字</ask_user>';
       final askOpen = s.indexOf('<ask_user>');
       expect(askOpen, greaterThan(0));
       final close = s.indexOf('</ask_user>', askOpen);
@@ -148,12 +148,42 @@ void main() {
     });
   });
 
+  group('v1.7.35 回归：思考不得污染结论', () {
+    test('thinking 与 answer 分离解析', () {
+      final pieces = parseReActOutput(
+        '<thinking>第一轮思考</thinking><answer>最终结论</answer>',
+      );
+      expect(
+        pieces.where((piece) => piece['type'] == 'thinking').single['content'],
+        '第一轮思考',
+      );
+      expect(
+        pieces.where((piece) => piece['type'] == 'answer').single['content'],
+        '最终结论',
+      );
+    });
+
+    test('原生 think 标签不会成为 answer', () {
+      final pieces = parseReActOutput(
+        '<think>内部推理</think><answer>公开回答</answer>',
+      );
+      expect(
+        pieces.where((piece) => piece['type'] == 'answer').single['content'],
+        '公开回答',
+      );
+      expect(
+        pieces.where((piece) => piece['type'] == 'thinking').single['content'],
+        '内部推理',
+      );
+    });
+  });
+
   group('v1.4.1 回归：answer 不应外包', () {
     test('completeChat 不应无条件包 <answer>', () {
       // 核心回归：如果 AI 响应里已经包含 ReAct 标签（如 <ask_user>），
       // 我们不应该在外层包 <answer>，否则 _parseReActOutput 会把嵌套内容全吞进 answer 块。
       // 见 api_service.dart completeChat 对 ReAct 标签的检测逻辑。
-      final contentWithTag =
+      const contentWithTag =
           '<thinking>我需要更多信息</thinking><ask_user>你叫什么名字？</ask_user>';
       final hasReAct = RegExp(
               r'<\s*(thinking|search|ask_user|download|self_check)\b',
@@ -163,7 +193,7 @@ void main() {
     });
 
     test('纯文本 content 才需要包 <answer>', () {
-      final plainText = '你好世界';
+      const plainText = '你好世界';
       final hasReAct = RegExp(
               r'<\s*(thinking|search|ask_user|download|self_check)\b',
               caseSensitive: false)
